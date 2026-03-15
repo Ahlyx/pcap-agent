@@ -1,0 +1,15 @@
+# Binaries
+pcap-agent
+pcap-agent-*
+*.exe
+
+# Go
+*.test
+*.out
+
+# Environment
+.env
+
+# OS
+.DS_Store
+Thumbs.db

@@ -1,0 +1,83 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    name: Build ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            output: pcap-agent-linux-amd64
+            goos: linux
+            goarch: amd64
+          - os: windows-latest
+            output: pcap-agent-windows-amd64.exe
+            goos: windows
+            goarch: amd64
+          - os: macos-latest
+            output: pcap-agent-darwin-amd64
+            goos: darwin
+            goarch: amd64
+          - os: macos-latest
+            output: pcap-agent-darwin-arm64
+            goos: darwin
+            goarch: arm64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Install libpcap (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: sudo apt-get install -y libpcap-dev
+
+      - name: Install libpcap (macOS)
+        if: matrix.os == 'macos-latest'
+        run: brew install libpcap
+
+      - name: Build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: 1
+        run: go build -ldflags="-s -w" -o ${{ matrix.output }} ./cmd/agent
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.output }}
+          path: ${{ matrix.output }}
+
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            pcap-agent-linux-amd64
+            pcap-agent-windows-amd64.exe
+            pcap-agent-darwin-amd64
+            pcap-agent-darwin-arm64
+          generate_release_notes: true
