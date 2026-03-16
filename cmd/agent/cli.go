@@ -18,7 +18,7 @@ import (
 var (
 	flagInterface string
 	flagPort      int
-	flagMode      string
+	flagRelay     bool
 )
 
 func buildRootCmd() *cobra.Command {
@@ -29,7 +29,7 @@ func buildRootCmd() *cobra.Command {
 
 	root.PersistentFlags().StringVarP(&flagInterface, "interface", "i", "", "Network interface to capture on (default: auto-detect)")
 	root.PersistentFlags().IntVarP(&flagPort, "port", "p", 7777, "WebSocket server port")
-	root.PersistentFlags().StringVarP(&flagMode, "mode", "m", "local", "Mode: local or relay")
+	root.PersistentFlags().BoolVar(&flagRelay, "relay", false, "Stream via api.ahlyxlabs.com relay instead of local WebSocket")
 
 	root.AddCommand(buildStartCmd())
 	root.AddCommand(buildListCmd())
@@ -70,26 +70,12 @@ func runStart(cmd *cobra.Command, args []string) error {
 		log.Printf("auto-selected interface: %s", iface)
 	}
 
-	sess := session.NewSession(flagMode, iface)
+	mode := "local"
+	if flagRelay {
+		mode = "relay"
+	}
+	sess := session.NewSession(mode, iface)
 	log.Println(sess)
-
-	hub := ws.NewHub()
-	go hub.Run()
-
-	srv := ws.NewServer(flagPort, hub)
-
-	// Broadcast initial status.
-	hub.Broadcast(ws.NewStatusMessage(flagMode, iface, sess.ID, false))
-
-	// Start WebSocket server in background.
-	go func() {
-		if err := srv.Start(); err != nil {
-			log.Fatalf("ws server: %v", err)
-		}
-	}()
-
-	// Wait briefly so the server is up before capturing.
-	time.Sleep(100 * time.Millisecond)
 
 	cfg := capture.Config{
 		Interface:   iface,
@@ -103,16 +89,56 @@ func runStart(cmd *cobra.Command, args []string) error {
 	}
 	defer cap.Stop()
 
-	hub.Broadcast(ws.NewStatusMessage(flagMode, iface, sess.ID, true))
+	pktCh := make(chan gopacket.Packet, 1024)
+
+	if flagRelay {
+		fmt.Println("WARNING: relay mode enabled — connection metadata will be transmitted")
+		fmt.Println("to api.ahlyxlabs.com. No packet payloads are ever transmitted,")
+		fmt.Println("only flow summaries (src IP, dst IP, port, protocol, byte count).")
+		fmt.Println("Press ENTER to continue or Ctrl+C to cancel.")
+		fmt.Scanln()
+
+		relayClient, err := ws.NewRelayClient("https://api.ahlyxlabs.com")
+		if err != nil {
+			return fmt.Errorf("relay: %w", err)
+		}
+		defer relayClient.Close()
+
+		fmt.Printf("pcap-agent v0.2.0\n")
+		fmt.Printf("interface:  %s\n", iface)
+		fmt.Printf("mode:       relay\n")
+		fmt.Printf("session:    %s\n", relayClient.SessionID())
+		fmt.Printf("dashboard:  ahlyxlabs.com/pcap?session=%s\n", relayClient.SessionID())
+		fmt.Printf("press Ctrl+C to stop\n")
+
+		cap.Start(pktCh)
+		return runAnalysisPipeline(relayClient.Broadcast, pktCh)
+	}
+
+	// Local mode.
+	hub := ws.NewHub()
+	go hub.Run()
+
+	srv := ws.NewServer(flagPort, hub)
+
+	hub.Broadcast(ws.NewStatusMessage("local", iface, sess.ID, false))
+
+	go func() {
+		if err := srv.Start(); err != nil {
+			log.Fatalf("ws server: %v", err)
+		}
+	}()
+
+	time.Sleep(100 * time.Millisecond)
+
+	hub.Broadcast(ws.NewStatusMessage("local", iface, sess.ID, true))
 	log.Printf("capturing on %s  (ws://localhost:%d)", iface, flagPort)
 
-	pktCh := make(chan gopacket.Packet, 1024)
 	cap.Start(pktCh)
-
-	return runAnalysisPipeline(hub, pktCh)
+	return runAnalysisPipeline(hub.Broadcast, pktCh)
 }
 
-func runAnalysisPipeline(hub *ws.Hub, pktCh <-chan gopacket.Packet) error {
+func runAnalysisPipeline(broadcast func(interface{}), pktCh <-chan gopacket.Packet) error {
 	flows := analyze.NewFlowTable(5 * time.Minute)
 	talkers := analyze.NewTalkerCounter()
 	protos := analyze.NewProtocolCounter()
@@ -132,20 +158,20 @@ func runAnalysisPipeline(hub *ws.Hub, pktCh <-chan gopacket.Packet) error {
 			if !ok {
 				return nil
 			}
-			processPacket(pkt, hub, flows, talkers, protos, beaconing, portScan, &totalPackets, &totalBytes)
+			processPacket(pkt, broadcast, flows, talkers, protos, beaconing, portScan, &totalPackets, &totalBytes)
 
 		case <-statsTicker.C:
-			sendStats(hub, totalPackets, totalBytes, talkers, protos, flows)
+			sendStats(broadcast, totalPackets, totalBytes, talkers, protos, flows)
 
 		case <-alertTicker.C:
-			checkAlerts(hub, beaconing, portScan)
+			checkAlerts(broadcast, beaconing, portScan)
 		}
 	}
 }
 
 func processPacket(
 	pkt gopacket.Packet,
-	hub *ws.Hub,
+	broadcast func(interface{}),
 	flows *analyze.FlowTable,
 	talkers *analyze.TalkerCounter,
 	protos *analyze.ProtocolCounter,
@@ -193,7 +219,7 @@ func processPacket(
 	flows.Update(key, pktLen)
 
 	// Emit flow message.
-	hub.Broadcast(ws.NewFlowMessage(srcIP, dstIP, srcPort, dstPort, proto, pktLen, 1))
+	broadcast(ws.NewFlowMessage(srcIP, dstIP, srcPort, dstPort, proto, pktLen, 1))
 
 	// Parse DNS.
 	if evt := analyze.ParseDNS(pkt); evt != nil {
@@ -202,32 +228,32 @@ func processPacket(
 			r := evt.Response
 			resp = &r
 		}
-		hub.Broadcast(ws.NewDNSMessage(evt.Src, evt.Query, evt.RecordType, resp))
+		broadcast(ws.NewDNSMessage(evt.Src, evt.Query, evt.RecordType, resp))
 	}
 }
 
-func sendStats(hub *ws.Hub, totalPackets, totalBytes uint64, talkers *analyze.TalkerCounter, protos *analyze.ProtocolCounter, flows *analyze.FlowTable) {
+func sendStats(broadcast func(interface{}), totalPackets, totalBytes uint64, talkers *analyze.TalkerCounter, protos *analyze.ProtocolCounter, flows *analyze.FlowTable) {
 	top := talkers.TopN(10)
 	talkerEntries := make([]ws.TalkerEntry, len(top))
 	for i, t := range top {
 		talkerEntries[i] = ws.TalkerEntry{IP: t.IP, Bytes: t.Bytes}
 	}
-	hub.Broadcast(ws.NewStatsMessage(totalPackets, totalBytes, talkerEntries, protos.Snapshot(), flows.ActiveCount()))
+	broadcast(ws.NewStatsMessage(totalPackets, totalBytes, talkerEntries, protos.Snapshot(), flows.ActiveCount()))
 }
 
-func checkAlerts(hub *ws.Hub, beaconing *analyze.BeaconingDetector, portScan *analyze.PortScanDetector) {
+func checkAlerts(broadcast func(interface{}), beaconing *analyze.BeaconingDetector, portScan *analyze.PortScanDetector) {
 	for _, r := range beaconing.Check() {
 		msg := ws.NewAlertMessage("beaconing", r.Src, r.Dst, r.Count)
 		iv := r.IntervalMS
 		msg.IntervalMS = &iv
-		hub.Broadcast(msg)
+		broadcast(msg)
 	}
 	for _, r := range portScan.Check() {
 		msg := ws.NewAlertMessage("port_scan", r.Src, r.Dst, len(r.PortsHit))
 		msg.PortsHit = r.PortsHit
 		w := int(r.Window.Seconds())
 		msg.WindowSeconds = &w
-		hub.Broadcast(msg)
+		broadcast(msg)
 	}
 }
 
