@@ -3,7 +3,7 @@
 ## Project
 pcap-agent — lightweight Go network capture agent with a real-time browser dashboard. Users run the binary locally, open ahlyxlabs.com/pcap, and see their network traffic live.
 
-**Repo:** https://github.com/Ahlyx/pcap-analyzer  
+**Repo:** https://github.com/Ahlyx/pcap-agent  
 **Part of:** Ahlyx Labs platform (https://ahlyxlabs.com)
 
 ---

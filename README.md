@@ -7,9 +7,9 @@
 ---
 
 ![Go](https://img.shields.io/badge/go-1.22+-00ADD8?logo=go&logoColor=white)
-![License](https://img.shields.io/github/license/Ahlyx/pcap-analyzer)
-![CI](https://github.com/Ahlyx/pcap-analyzer/actions/workflows/ci.yml/badge.svg)
-![Release](https://img.shields.io/github/v/release/Ahlyx/pcap-analyzer)
+![License](https://img.shields.io/github/license/Ahlyx/pcap-agent)
+![CI](https://github.com/Ahlyx/pcap-agent/actions/workflows/ci.yml/badge.svg)
+![Release](https://img.shields.io/github/v/release/Ahlyx/pcap-agent)
 
 ---
 
@@ -62,7 +62,7 @@ brew install libpcap
 
 ### Option 1 — Download binary (recommended)
 
-Download the latest release from [github.com/Ahlyx/pcap-analyzer/releases/latest](https://github.com/Ahlyx/pcap-analyzer/releases/latest):
+Download the latest release from [github.com/Ahlyx/pcap-agent/releases/latest](https://github.com/Ahlyx/pcap-agent/releases/latest):
 
 | Platform | File |
 |---|---|
@@ -75,8 +75,8 @@ Download the latest release from [github.com/Ahlyx/pcap-analyzer/releases/latest
 
 ```bash
 # Requires Go 1.22+ and libpcap-dev
-git clone https://github.com/Ahlyx/pcap-analyzer.git
-cd pcap-analyzer
+git clone https://github.com/Ahlyx/pcap-agent.git
+cd pcap-agent
 go build -o pcap-agent ./cmd/agent
 ```
 
@@ -200,7 +200,7 @@ CI runs on every push to `main`. Release binaries for all four platforms are bui
 ## Architecture
 
 ```
-pcap-analyzer/
+pcap-agent/
 ├── cmd/agent/
 │   ├── main.go         entry point
 │   └── cli.go          cobra commands: start, list-interfaces

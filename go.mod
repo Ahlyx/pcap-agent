@@ -1,4 +1,4 @@
-module github.com/Ahlyx/pcap-analyzer
+module github.com/Ahlyx/pcap-agent
 
 go 1.22
 
