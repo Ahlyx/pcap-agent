@@ -139,11 +139,15 @@ func runAnalysisPipeline(broadcast func(interface{}), pktCh <-chan gopacket.Pack
 	protos := analyze.NewProtocolCounter()
 	beaconing := analyze.NewBeaconingDetector(analyze.DefaultBeaconingConfig())
 	portScan := analyze.NewPortScanDetector(analyze.DefaultPortScanConfig())
+	macTracker := analyze.NewMACTracker()
+	sessionRecon := analyze.NewSessionRecon()
 
 	statsTicker := time.NewTicker(5 * time.Second)
 	alertTicker := time.NewTicker(10 * time.Second)
+	expireTicker := time.NewTicker(30 * time.Second)
 	defer statsTicker.Stop()
 	defer alertTicker.Stop()
+	defer expireTicker.Stop()
 
 	log.Printf("pipeline started")
 	var totalPackets, totalBytes uint64
@@ -154,13 +158,16 @@ func runAnalysisPipeline(broadcast func(interface{}), pktCh <-chan gopacket.Pack
 			if !ok {
 				return nil
 			}
-			processPacket(pkt, broadcast, flows, talkers, protos, beaconing, portScan, &totalPackets, &totalBytes)
+			processPacket(pkt, broadcast, flows, talkers, protos, beaconing, portScan, macTracker, sessionRecon, &totalPackets, &totalBytes)
 
 		case <-statsTicker.C:
 			sendStats(broadcast, totalPackets, totalBytes, talkers, protos, flows)
 
 		case <-alertTicker.C:
 			checkAlerts(broadcast, beaconing, portScan)
+
+		case <-expireTicker.C:
+			sessionRecon.ExpireStale(time.Now().Add(-30 * time.Second))
 		}
 	}
 }
@@ -173,6 +180,8 @@ func processPacket(
 	protos *analyze.ProtocolCounter,
 	beaconing *analyze.BeaconingDetector,
 	portScan *analyze.PortScanDetector,
+	macTracker *analyze.MACTracker,
+	sessionRecon *analyze.SessionRecon,
 	totalPackets, totalBytes *uint64,
 ) {
 	pktLen := uint64(len(pkt.Data()))
@@ -188,6 +197,19 @@ func processPacket(
 	srcIP, dstIP := splitEndpointsFromFlow(netLayer.NetworkFlow())
 	talkers.Record(srcIP, pktLen)
 
+	// L2 MAC intelligence.
+	if eth, ok := pkt.Layer(layers.LayerTypeEthernet).(*layers.Ethernet); ok && eth != nil {
+		mac := eth.SrcMAC.String()
+		intel, first := macTracker.Record(mac, srcIP)
+		if first {
+			broadcast(ws.NewMACMessage(intel.MAC, intel.IP, intel.Vendor, intel.Spoofed))
+		}
+		if ips := macTracker.MultihomeCheck(mac); len(ips) > 1 {
+			msg := ws.NewAlertMessage("mac_multihome", mac, srcIP, len(ips))
+			broadcast(msg)
+		}
+	}
+
 	var srcPort, dstPort uint16
 	var proto string
 
@@ -197,6 +219,30 @@ func processPacket(
 		proto = "TCP"
 		beaconing.Record(srcIP, dstIP)
 		portScan.Record(srcIP, dstIP, dstPort)
+
+		var flags uint8
+		if tcp.SYN {
+			flags |= 0x02
+		}
+		if tcp.ACK {
+			flags |= 0x10
+		}
+		if tcp.RST {
+			flags |= 0x04
+		}
+		if tcp.FIN {
+			flags |= 0x01
+		}
+		tcpKey := analyze.FlowKey{
+			SrcIP:   srcIP,
+			DstIP:   dstIP,
+			SrcPort: srcPort,
+			DstPort: dstPort,
+			Proto:   proto,
+		}
+		for _, anomaly := range sessionRecon.Record(tcpKey, flags, uint32(tcp.Seq)) {
+			broadcast(ws.NewTCPAnomalyMessage(anomaly.Subtype, anomaly.Key.SrcIP, anomaly.Key.DstIP, anomaly.Key.DstPort, 1))
+		}
 	} else if udp, ok := pkt.Layer(layers.LayerTypeUDP).(*layers.UDP); ok && udp != nil {
 		srcPort = uint16(udp.SrcPort)
 		dstPort = uint16(udp.DstPort)

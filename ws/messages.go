@@ -124,6 +124,52 @@ func NewEnrichmentMessage(ip, verdict string, abuseScore *int, isTor bool) *Enri
 	}
 }
 
+// MACMessage reports a newly observed MAC address.
+type MACMessage struct {
+	Type      string    `json:"type"`
+	MAC       string    `json:"mac"`
+	IP        string    `json:"ip"`
+	Vendor    string    `json:"vendor"`
+	Spoofed   bool      `json:"spoofed"`
+	Timestamp time.Time `json:"timestamp"`
+}
+
+func NewMACMessage(mac, ip, vendor string, spoofed bool) *MACMessage {
+	return &MACMessage{
+		Type:      "mac",
+		MAC:       mac,
+		IP:        ip,
+		Vendor:    vendor,
+		Spoofed:   spoofed,
+		Timestamp: time.Now(),
+	}
+}
+
+// TCPAnomalyMessage reports a detected TCP-level anomaly.
+type TCPAnomalyMessage struct {
+	Type      string    `json:"type"`
+	AlertType string    `json:"alert_type"`
+	Subtype   string    `json:"subtype"`
+	Src       string    `json:"src"`
+	Dst       string    `json:"dst"`
+	DstPort   uint16    `json:"dst_port"`
+	Count     int       `json:"count"`
+	Timestamp time.Time `json:"timestamp"`
+}
+
+func NewTCPAnomalyMessage(subtype, src, dst string, dstPort uint16, count int) *TCPAnomalyMessage {
+	return &TCPAnomalyMessage{
+		Type:      "alert",
+		AlertType: "tcp_anomaly",
+		Subtype:   subtype,
+		Src:       src,
+		Dst:       dst,
+		DstPort:   dstPort,
+		Count:     count,
+		Timestamp: time.Now(),
+	}
+}
+
 // StatusMessage describes the current agent state.
 type StatusMessage struct {
 	Type      string `json:"type"`

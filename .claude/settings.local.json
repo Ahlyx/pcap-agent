@@ -1,0 +1,18 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(for f:*)",
+      "Bash(do echo:*)",
+      "Read(//home/ahlyx/pcap-agent/**)",
+      "Bash(done)",
+      "Bash(go get:*)",
+      "Bash(go build:*)",
+      "Bash(sudo apt-get:*)",
+      "Bash(dpkg:*)",
+      "Bash(go vet:*)",
+      "Bash(./pcap-agent start:*)",
+      "Bash(echo:*)",
+      "Bash(go test *)"
+    ]
+  }
+}

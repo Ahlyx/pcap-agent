@@ -158,7 +158,7 @@ function addFlow(msg) {
     setTimeout(function () { tr.classList.remove('row-new'); }, 500);
 
     const isOT     = isOTPort(msg.dst_port);
-    const isThreat = threatIPs.has(msg.src_ip) || threatIPs.has(msg.dst_ip);
+    const isThreat = threatIPs.has(msg.src) || threatIPs.has(msg.dst);
 
     const tdTime  = document.createElement('td');
     const tdSrc   = document.createElement('td');
@@ -175,8 +175,8 @@ function addFlow(msg) {
     tdBytes.className = 'col-dim';
 
     tdTime.textContent  = formatTime(msg.timestamp);
-    tdSrc.textContent   = msg.src_ip;
-    tdDst.textContent   = msg.dst_ip;
+    tdSrc.textContent   = msg.src;
+    tdDst.textContent   = msg.dst;
     tdPort.textContent  = isOT ? msg.dst_port + ' ⚠ OT' : msg.dst_port;
     tdProto.textContent = msg.protocol;
     tdBytes.textContent = formatBytes(msg.bytes);
