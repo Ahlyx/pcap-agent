@@ -1,6 +1,7 @@
 package analyze
 
 import (
+	"fmt"
 	"reflect"
 	"testing"
 	"time"
@@ -115,38 +116,94 @@ func TestBidirectionalSessionAndRetransmissionSemantics(t *testing.T) {
 	}
 }
 
-func TestMidstreamAndSynPressureAccounting(t *testing.T) {
+func TestOutboundConnectionBurstIsNotSynFloodPressure(t *testing.T) {
+	at, r := time.Unix(100, 0), NewSessionRecon()
+	local := "2001:db8:10::5"
+	remote := "2606:4700:4700::1111"
+	localIPs := map[string]struct{}{local: {}}
+	for i := 0; i < r.HalfOpenThreshold; i++ {
+		key := tcpKey(local, uint16(50000+i), remote, 443)
+		if got := r.RecordAtForLocalDestination(key, tcpFlagSYN, 1, 0, at.Add(time.Duration(i)*time.Millisecond), localIPs).Anomalies; len(got) != 0 {
+			t.Fatalf("normal outbound HTTPS burst became SYN flood evidence: %#v", got)
+		}
+	}
+	if got := r.HalfOpenCount(Endpoint{}, Endpoint{IP: remote, Port: 443}); got != 0 {
+		t.Fatalf("outbound attempts entered protected-service pressure accounting: %d", got)
+	}
+}
+
+func TestInboundSynPressureTargetsMonitoredService(t *testing.T) {
+	at, r := time.Unix(100, 0), NewSessionRecon()
+	local := "2001:db8:20::10"
+	localIPs := map[string]struct{}{local: {}}
+	for i := 0; i < r.HalfOpenThreshold; i++ {
+		key := tcpKey(fmt.Sprintf("2001:db8:30::%x", i+1), uint16(40000+i), local, 443)
+		got := r.RecordAtForLocalDestination(key, tcpFlagSYN, 1, 0, at.Add(time.Duration(i)*time.Millisecond), localIPs).Anomalies
+		if i < r.HalfOpenThreshold-1 && len(got) != 0 {
+			t.Fatalf("pressure alerted before threshold: %#v", got)
+		}
+		if i == r.HalfOpenThreshold-1 && (len(got) != 1 || got[0].Subtype != "possible_syn_flood" || got[0].Count != r.HalfOpenThreshold) {
+			t.Fatalf("inbound monitored-service pressure did not alert at threshold: %#v", got)
+		}
+	}
+	if got := r.HalfOpenCount(Endpoint{}, Endpoint{IP: local, Port: 443}); got != r.HalfOpenThreshold {
+		t.Fatalf("protected service half-open count = %d, want %d", got, r.HalfOpenThreshold)
+	}
+}
+
+func TestSynRetransmissionsDoNotInflateProtectedPressure(t *testing.T) {
 	at, r := time.Unix(100, 0), NewSessionRecon()
 	r.HalfOpenThreshold = 2
-	midstream := tcpKey("10.0.0.2", 50000, "203.0.113.2", 443)
-	if got := r.RecordAt(midstream, tcpFlagACK, 100, 10, at).Anomalies; len(got) != 0 {
-		t.Fatalf("midstream data inferred attack: %#v", got)
+	local := "10.0.0.2"
+	localIPs := map[string]struct{}{local: {}}
+	key := tcpKey("203.0.113.2", 50001, local, 443)
+	for i := 0; i < 20; i++ {
+		if got := r.RecordAtForLocalDestination(key, tcpFlagSYN, 1, 0, at.Add(time.Duration(i)*time.Millisecond), localIPs).Anomalies; len(got) != 0 {
+			t.Fatalf("SYN retransmission produced pressure alert: %#v", got)
+		}
 	}
-	if got := r.RecordAt(midstream, tcpFlagRST, 100, 0, at).Anomalies; len(got) != 0 {
-		t.Fatalf("midstream reset inferred attack: %#v", got)
+	if got := r.HalfOpenCount(Endpoint{}, endpointFromKeyDst(key)); got != 1 {
+		t.Fatalf("SYN retransmissions inflated half-open count: %d", got)
 	}
-	a := tcpKey("10.0.0.2", 50001, "203.0.113.2", 443)
-	b := tcpKey("10.0.0.2", 50002, "203.0.113.2", 443)
-	c := tcpKey("10.0.0.2", 50003, "203.0.113.2", 443)
-	r.RecordAt(a, tcpFlagSYN, 1, 0, at)
-	r.RecordAt(a, tcpFlagSYN, 1, 0, at.Add(time.Second))
-	if got := r.HalfOpenCount(endpointFromKeySrc(a), endpointFromKeyDst(a)); got != 1 {
-		t.Fatalf("SYN retransmit inflated half-open count: %d", got)
+}
+
+func TestCompletedHandshakeRemovesProtectedHalfOpen(t *testing.T) {
+	at, r := time.Unix(100, 0), NewSessionRecon()
+	local := "10.0.0.2"
+	localIPs := map[string]struct{}{local: {}}
+	key := tcpKey("203.0.113.2", 50001, local, 443)
+	r.RecordAtForLocalDestination(key, tcpFlagSYN, 1, 0, at, localIPs)
+	reverse := tcpKey(key.DstIP, key.DstPort, key.SrcIP, key.SrcPort)
+	r.RecordAtForLocalDestination(reverse, tcpFlagSYN|tcpFlagACK, 2, 0, at.Add(time.Millisecond), localIPs)
+	r.RecordAtForLocalDestination(key, tcpFlagACK, 2, 0, at.Add(2*time.Millisecond), localIPs)
+	if got := r.HalfOpenCount(Endpoint{}, endpointFromKeyDst(key)); got != 0 {
+		t.Fatalf("completed handshake left protected session half-open: %d", got)
 	}
-	if got := r.RecordAt(b, tcpFlagSYN, 1, 0, at).Anomalies; len(got) != 1 || got[0].Subtype != "possible_syn_flood" {
-		t.Fatalf("threshold crossing missing: %#v", got)
-	}
-	if got := r.RecordAt(c, tcpFlagSYN, 1, 0, at).Anomalies; len(got) != 0 {
-		t.Fatalf("pressure emitted for every SYN: %#v", got)
-	}
-	reverse := tcpKey(a.DstIP, a.DstPort, a.SrcIP, a.SrcPort)
-	r.RecordAt(reverse, tcpFlagSYN|tcpFlagACK, 2, 0, at)
-	if got := r.HalfOpenCount(endpointFromKeySrc(a), endpointFromKeyDst(a)); got != 2 {
-		t.Fatalf("handshake did not remove half-open: %d", got)
-	}
+}
+
+func TestStaleProtectedHalfOpenExpires(t *testing.T) {
+	at, r := time.Unix(100, 0), NewSessionRecon()
+	local := "10.0.0.2"
+	localIPs := map[string]struct{}{local: {}}
+	key := tcpKey("203.0.113.2", 50001, local, 443)
+	r.RecordAtForLocalDestination(key, tcpFlagSYN, 1, 0, at, localIPs)
 	r.ExpireStale(at.Add(time.Second))
-	if got := r.HalfOpenCount(endpointFromKeySrc(a), endpointFromKeyDst(a)); got != 0 {
-		t.Fatalf("timeout did not remove half-open: %d", got)
+	if got := r.HalfOpenCount(Endpoint{}, endpointFromKeyDst(key)); got != 0 {
+		t.Fatalf("stale protected half-open session remained: %d", got)
+	}
+}
+
+func TestCaptureBeginningMidstreamDoesNotCreateSynPressure(t *testing.T) {
+	at, r := time.Unix(100, 0), NewSessionRecon()
+	r.HalfOpenThreshold = 1
+	local := "10.0.0.2"
+	localIPs := map[string]struct{}{local: {}}
+	midstream := tcpKey("203.0.113.2", 50001, local, 443)
+	if got := r.RecordAtForLocalDestination(midstream, tcpFlagACK, 100, 10, at, localIPs).Anomalies; len(got) != 0 {
+		t.Fatalf("midstream data inferred SYN flood: %#v", got)
+	}
+	if got := r.RecordAtForLocalDestination(midstream, tcpFlagRST, 100, 0, at.Add(time.Millisecond), localIPs).Anomalies; len(got) != 0 {
+		t.Fatalf("midstream reset inferred SYN flood: %#v", got)
 	}
 }
 

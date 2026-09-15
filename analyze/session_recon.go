@@ -46,7 +46,7 @@ type TCPSession struct {
 	SYNTime              time.Time
 	DataSeen             bool
 	LastSeen             time.Time
-	HalfOpen             bool
+	PressureHalfOpen     bool
 	ResetReported        bool
 	RetransmitReported   bool
 	Ranges               map[Endpoint][]sequenceRange
@@ -74,13 +74,13 @@ type TCPRecordResult struct {
 type SessionRecon struct {
 	mu                sync.Mutex
 	sessions          map[SessionKey]*TCPSession
-	halfOpen          map[string]map[SessionKey]struct{}
-	pressureReported  map[string]bool
+	halfOpen          map[Endpoint]map[SessionKey]struct{}
+	pressureReported  map[Endpoint]bool
 	HalfOpenThreshold int
 }
 
 func NewSessionRecon() *SessionRecon {
-	return &SessionRecon{sessions: make(map[SessionKey]*TCPSession), halfOpen: make(map[string]map[SessionKey]struct{}), pressureReported: make(map[string]bool), HalfOpenThreshold: 20}
+	return &SessionRecon{sessions: make(map[SessionKey]*TCPSession), halfOpen: make(map[Endpoint]map[SessionKey]struct{}), pressureReported: make(map[Endpoint]bool), HalfOpenThreshold: 20}
 }
 
 // Record remains a convenience API for callers that do not supply replayable
@@ -89,16 +89,33 @@ func (r *SessionRecon) Record(key FlowKey, flags uint8, seq uint32) []TCPAnomaly
 	return r.RecordAt(key, flags, seq, 0, time.Now()).Anomalies
 }
 
+// RecordAt tracks a TCP conversation without treating either endpoint as a
+// protected local service. Call RecordAtForLocalDestination from a capture
+// pipeline that knows the selected interface addresses when evaluating SYN
+// pressure.
 func (r *SessionRecon) RecordAt(key FlowKey, flags uint8, seq uint32, payloadLen int, at time.Time) TCPRecordResult {
+	return r.recordAtLocked(key, flags, seq, payloadLen, at, false)
+}
+
+// RecordAtForLocalDestination tracks a TCP conversation and only accounts a
+// SYN as possible service-side pressure when it is directed to a known address
+// on the selected local interface. Outbound connection bursts are therefore
+// never labeled possible_syn_flood.
+func (r *SessionRecon) RecordAtForLocalDestination(key FlowKey, flags uint8, seq uint32, payloadLen int, at time.Time, localIPs map[string]struct{}) TCPRecordResult {
+	_, monitoredDestination := localIPs[key.DstIP]
+	return r.recordAtLocked(key, flags, seq, payloadLen, at, monitoredDestination)
+}
+
+func (r *SessionRecon) recordAtLocked(key FlowKey, flags uint8, seq uint32, payloadLen int, at time.Time, monitorDestination bool) TCPRecordResult {
 	if at.IsZero() {
 		at = time.Now()
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.recordAt(key, flags, seq, payloadLen, at)
+	return r.recordAt(key, flags, seq, payloadLen, at, monitorDestination)
 }
 
-func (r *SessionRecon) recordAt(key FlowKey, flags uint8, seq uint32, payloadLen int, at time.Time) TCPRecordResult {
+func (r *SessionRecon) recordAt(key FlowKey, flags uint8, seq uint32, payloadLen int, at time.Time, monitorDestination bool) TCPRecordResult {
 	canonical := CanonicalSessionKey(key)
 	src, dst := endpointFromKeySrc(key), endpointFromKeyDst(key)
 	syn, ack := flags&tcpFlagSYN != 0, flags&tcpFlagACK != 0
@@ -106,9 +123,11 @@ func (r *SessionRecon) recordAt(key FlowKey, flags uint8, seq uint32, payloadLen
 	sess, exists := r.sessions[canonical]
 	newAttempt := syn && !ack && (!exists || sess.State == StateClosed)
 	if newAttempt {
-		sess = &TCPSession{Initiator: src, Responder: dst, State: StateSYN, SYNTime: at, LastSeen: at, HalfOpen: true, Ranges: make(map[Endpoint][]sequenceRange)}
+		sess = &TCPSession{Initiator: src, Responder: dst, State: StateSYN, SYNTime: at, LastSeen: at, PressureHalfOpen: monitorDestination, Ranges: make(map[Endpoint][]sequenceRange)}
 		r.sessions[canonical] = sess
-		r.addHalfOpen(sess, canonical)
+		if monitorDestination {
+			r.addHalfOpen(sess, canonical)
+		}
 		result := TCPRecordResult{ConnectionAttempt: &ConnectionAttempt{SrcIP: key.SrcIP, SrcPort: key.SrcPort, DstIP: key.DstIP, DstPort: key.DstPort, At: at}}
 		result.Anomalies = r.pressureAnomaly(sess, canonical, key)
 		// SYN is bookkeeping only; it is not classified as a retransmission.
@@ -165,8 +184,10 @@ func (r *SessionRecon) recordRange(sess *TCPSession, direction Endpoint, seq uin
 	return false
 }
 
-// Scope pressure by source and destination host, not ephemeral client port.
-func halfOpenScope(s *TCPSession) string { return s.Initiator.IP + "->" + s.Responder.IP }
+// Scope pressure by the local destination service. The session key keeps
+// source address/ephemeral-port uniqueness, while the scope represents the
+// host and port that may be under SYN pressure.
+func halfOpenScope(s *TCPSession) Endpoint { return s.Responder }
 func (r *SessionRecon) addHalfOpen(s *TCPSession, key SessionKey) {
 	scope := halfOpenScope(s)
 	if r.halfOpen[scope] == nil {
@@ -175,7 +196,7 @@ func (r *SessionRecon) addHalfOpen(s *TCPSession, key SessionKey) {
 	r.halfOpen[scope][key] = struct{}{}
 }
 func (r *SessionRecon) removeHalfOpen(s *TCPSession, key SessionKey) {
-	if !s.HalfOpen {
+	if !s.PressureHalfOpen {
 		return
 	}
 	scope := halfOpenScope(s)
@@ -184,7 +205,7 @@ func (r *SessionRecon) removeHalfOpen(s *TCPSession, key SessionKey) {
 		delete(r.halfOpen, scope)
 		delete(r.pressureReported, scope)
 	}
-	s.HalfOpen = false
+	s.PressureHalfOpen = false
 }
 func (r *SessionRecon) pressureAnomaly(s *TCPSession, key SessionKey, flow FlowKey) []TCPAnomaly {
 	scope := halfOpenScope(s)
@@ -213,5 +234,5 @@ func (r *SessionRecon) ActiveCount() int { r.mu.Lock(); defer r.mu.Unlock(); ret
 func (r *SessionRecon) HalfOpenCount(src, dst Endpoint) int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return len(r.halfOpen[src.IP+"->"+dst.IP])
+	return len(r.halfOpen[dst])
 }

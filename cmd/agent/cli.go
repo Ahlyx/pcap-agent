@@ -256,7 +256,7 @@ func processPacket(
 			DstPort: dstPort,
 			Proto:   proto,
 		}
-		recorded := sessionRecon.RecordAt(tcpKey, flags, uint32(tcp.Seq), len(tcp.Payload), ts)
+		recorded := sessionRecon.RecordAtForLocalDestination(tcpKey, flags, uint32(tcp.Seq), len(tcp.Payload), ts, localIPs)
 		if attempt := recorded.ConnectionAttempt; attempt != nil {
 			// Scan evidence uses every unique initial SYN. Cadence is limited to
 			// a known local source so it is never claimed to be outbound otherwise.
@@ -272,7 +272,7 @@ func processPacket(
 			}
 			alertID := ws.AlertID(anomaly.Subtype, analyze.CanonicalSessionKey(anomaly.Key).String())
 			if anomaly.Subtype == "possible_syn_flood" {
-				alertID = ws.AlertID(anomaly.Subtype, anomaly.Key.SrcIP, anomaly.Key.DstIP)
+				alertID = ws.AlertID(anomaly.Subtype, anomaly.Key.DstIP, fmt.Sprint(anomaly.Key.DstPort))
 			}
 			msg := ws.NewAlertMessage(alertID, "tcp_anomaly", severity, anomaly.Key.SrcIP, anomaly.Key.DstIP, anomaly.Count)
 			msg.Subtype = anomaly.Subtype
