@@ -17,7 +17,7 @@ jobs:
             goos: linux
             goarch: amd64
           - os: windows-latest
-            output: pcap-agent-windows-amd64.exe
+            output: pcap-agent.exe
             goos: windows
             goarch: amd64
           - os: macos-latest
@@ -77,7 +77,7 @@ jobs:
         with:
           files: |
             pcap-agent-linux-amd64
-            pcap-agent-windows-amd64.exe
+            pcap-agent.exe
             pcap-agent-darwin-amd64
             pcap-agent-darwin-arm64
           generate_release_notes: true
