@@ -194,7 +194,7 @@ The dashboard shows flow observations, DNS query/answer metadata, counters, prot
 | --- | --- |
 | Periodic connection | A local-origin, unique TCP connection attempt repeats to the same destination service at low jitter over a minimum observation period. It is a `notice`, not proof of C2. |
 | Possible port scan | One source makes unique initial TCP attempts to at least 15 destination ports on one destination within 10 seconds. It is a `warning`, not a confirmed scan. Horizontal scans are not covered. |
-| Possible SYN flood / SYN pressure | A bounded number of unique half-open TCP sessions reaches the configured threshold. SYN retransmissions do not add to that count. |
+| Possible SYN flood / SYN pressure | Unique half-open initial SYNs directed at a selected-interface local service (destination IP + port) reach the configured threshold. SYN retransmissions do not add to that count; ordinary outbound connection bursts do not trigger this observation. |
 | TCP retransmission | A repeated TCP data/sequence range; ACK-only packets are ignored. Retransmission is normal on imperfect networks and is informational. |
 | TCP reset | A reset observed for a tracked session. It is informational; the agent does not infer RST injection. |
 | MAC observation | Vendor lookup plus the locally administered-address bit. Locally administered does not mean spoofed. A MAC with multiple IPv4 addresses is informational only. |
@@ -248,7 +248,7 @@ The production frontend is maintained separately in `Ahlyx-Labs/frontend/pcap/`;
 - Capturing depends on local driver support and privilege; encrypted protocols are summarized from metadata, not decrypted.
 - The default BPF filter excludes non-TCP/UDP/ICMP traffic before analysis.
 - Auto interface selection is not default-route aware.
-- Flow messages are emitted per observed packet; aggregate flow state is used for counts/statistics.
+- Flow messages are generated per observed packet; aggregate flow state is used for counts/statistics. Under browser backpressure, flow/DNS updates may be dropped to preserve alert, status, and control delivery.
 - The production dashboard is maintained separately from this agent repository.
 - Detection is local, heuristic, and intentionally conservative. Review packet context and endpoint ownership before acting.
 
