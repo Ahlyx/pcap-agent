@@ -2,116 +2,116 @@ package analyze
 
 import (
 	"math"
+	"sort"
 	"sync"
 	"time"
 )
 
-// BeaconingConfig controls detection sensitivity.
 type BeaconingConfig struct {
-	// MinConnections is the minimum number of connections before scoring.
 	MinConnections int
-	// MaxJitterPct is the allowed coefficient of variation (stddev/mean) for
-	// intervals to be considered regular (0.0–1.0).
-	MaxJitterPct float64
-	// Window is how far back to look for connection timestamps.
-	Window time.Duration
+	MaxJitterPct   float64
+	MinSpan        time.Duration
+	Window         time.Duration
 }
 
-// DefaultBeaconingConfig returns sensible defaults.
 func DefaultBeaconingConfig() BeaconingConfig {
-	return BeaconingConfig{
-		MinConnections: 5,
-		MaxJitterPct:   0.20,
-		Window:         10 * time.Minute,
-	}
+	return BeaconingConfig{MinConnections: 6, MaxJitterPct: 0.20, MinSpan: time.Minute, Window: 10 * time.Minute}
 }
 
-// BeaconingDetector tracks outbound connection times per (src, dst) pair.
+type beaconKey struct {
+	src, dst string
+	dstPort  uint16
+}
+
+// BeaconingDetector tracks already-deduplicated local connection attempts.
 type BeaconingDetector struct {
 	mu      sync.Mutex
 	cfg     BeaconingConfig
-	history map[string][]time.Time // key: "src->dst"
+	history map[beaconKey][]time.Time
 }
 
-// NewBeaconingDetector creates a detector with the given config.
 func NewBeaconingDetector(cfg BeaconingConfig) *BeaconingDetector {
-	return &BeaconingDetector{
-		cfg:     cfg,
-		history: make(map[string][]time.Time),
-	}
+	return &BeaconingDetector{cfg: cfg, history: make(map[beaconKey][]time.Time)}
 }
-
-// Record adds a connection event for the (src, dst) pair.
-func (d *BeaconingDetector) Record(src, dst string) {
-	key := src + "->" + dst
-	now := time.Now()
-	cutoff := now.Add(-d.cfg.Window)
-
+func (d *BeaconingDetector) Record(src, dst string) { d.RecordAt(src, dst, 0, time.Now()) }
+func (d *BeaconingDetector) RecordAt(src, dst string, dstPort uint16, at time.Time) {
+	if at.IsZero() {
+		at = time.Now()
+	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
-
-	ts := d.history[key]
-	// Prune old entries.
-	valid := ts[:0]
-	for _, t := range ts {
-		if t.After(cutoff) {
-			valid = append(valid, t)
-		}
-	}
-	valid = append(valid, now)
-	d.history[key] = valid
+	k := beaconKey{src: src, dst: dst, dstPort: dstPort}
+	d.history[k] = append(pruneTimes(d.history[k], at.Add(-d.cfg.Window)), at)
 }
 
-// BeaconingResult holds detection output for one pair.
 type BeaconingResult struct {
-	Src        string
-	Dst        string
-	Count      int
-	IntervalMS float64
+	Src, Dst              string
+	DstPort               uint16
+	Count                 int
+	IntervalMS, JitterPct float64
+	ObservationSpan       time.Duration
 }
 
-// Check returns beaconing results for any (src, dst) pair that exceeds
-// the configured thresholds.
-func (d *BeaconingDetector) Check() []BeaconingResult {
+func (d *BeaconingDetector) Check() []BeaconingResult { return d.CheckAt(time.Now()) }
+
+// CheckAt prunes stale histories even when no later packets arrive.
+func (d *BeaconingDetector) CheckAt(now time.Time) []BeaconingResult {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-
-	var results []BeaconingResult
-	for key, ts := range d.history {
+	results := make([]BeaconingResult, 0)
+	for k, old := range d.history {
+		ts := pruneTimes(old, now.Add(-d.cfg.Window))
+		if len(ts) == 0 {
+			delete(d.history, k)
+			continue
+		}
+		d.history[k] = ts
 		if len(ts) < d.cfg.MinConnections {
 			continue
 		}
-		intervals := computeIntervals(ts)
-		mean := meanFloat(intervals)
-		if mean == 0 {
+		span := ts[len(ts)-1].Sub(ts[0])
+		if span < d.cfg.MinSpan {
 			continue
 		}
-		cv := stddevFloat(intervals) / mean
+		mean := meanFloat(computeIntervals(ts))
+		if mean <= 0 {
+			continue
+		}
+		cv := stddevFloat(computeIntervals(ts)) / mean
 		if cv <= d.cfg.MaxJitterPct {
-			src, dst := splitKey(key)
-			results = append(results, BeaconingResult{
-				Src:        src,
-				Dst:        dst,
-				Count:      len(ts),
-				IntervalMS: mean,
-			})
+			results = append(results, BeaconingResult{Src: k.src, Dst: k.dst, DstPort: k.dstPort, Count: len(ts), IntervalMS: mean, JitterPct: cv, ObservationSpan: span})
 		}
 	}
+	sort.Slice(results, func(i, j int) bool {
+		if results[i].Src != results[j].Src {
+			return results[i].Src < results[j].Src
+		}
+		if results[i].Dst != results[j].Dst {
+			return results[i].Dst < results[j].Dst
+		}
+		return results[i].DstPort < results[j].DstPort
+	})
 	return results
 }
-
-// computeIntervals returns millisecond gaps between sorted timestamps.
+func pruneTimes(ts []time.Time, cutoff time.Time) []time.Time {
+	valid := ts[:0]
+	for _, t := range ts {
+		if !t.Before(cutoff) {
+			valid = append(valid, t)
+		}
+	}
+	return valid
+}
 func computeIntervals(ts []time.Time) []float64 {
 	if len(ts) < 2 {
 		return nil
 	}
 	out := make([]float64, len(ts)-1)
 	for i := 1; i < len(ts); i++ {
-		out[i-1] = float64(ts[i].Sub(ts[i-1]).Milliseconds())
+		out[i-1] = float64(ts[i].Sub(ts[i-1])) / float64(time.Millisecond)
 	}
 	return out
 }
-
 func meanFloat(vals []float64) float64 {
 	if len(vals) == 0 {
 		return 0
@@ -122,7 +122,6 @@ func meanFloat(vals []float64) float64 {
 	}
 	return sum / float64(len(vals))
 }
-
 func stddevFloat(vals []float64) float64 {
 	if len(vals) == 0 {
 		return 0
@@ -130,17 +129,8 @@ func stddevFloat(vals []float64) float64 {
 	m := meanFloat(vals)
 	variance := 0.0
 	for _, v := range vals {
-		d := v - m
-		variance += d * d
+		delta := v - m
+		variance += delta * delta
 	}
 	return math.Sqrt(variance / float64(len(vals)))
-}
-
-func splitKey(key string) (src, dst string) {
-	for i := 0; i < len(key)-1; i++ {
-		if key[i] == '-' && key[i+1] == '>' {
-			return key[:i], key[i+2:]
-		}
-	}
-	return key, ""
 }

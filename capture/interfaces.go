@@ -59,6 +59,21 @@ func SelectDefault() (string, error) {
 	return "", errors.New("capture: no suitable non-loopback interface found")
 }
 
+// FindInterface returns the libpcap interface metadata for name. It is used at
+// startup so the user can verify the adapter and addresses actually selected.
+func FindInterface(name string) (Interface, error) {
+	ifaces, err := ListInterfaces()
+	if err != nil {
+		return Interface{}, err
+	}
+	for _, iface := range ifaces {
+		if iface.Name == name {
+			return iface, nil
+		}
+	}
+	return Interface{}, fmt.Errorf("capture: interface %q not found", name)
+}
+
 // PrintInterfaces prints a formatted table of available interfaces.
 func PrintInterfaces(ifaces []Interface) {
 	fmt.Printf("%-4s  %-16s  %-8s  %-24s  %s\n", "#", "Name", "Loopback", "Addresses", "Description")

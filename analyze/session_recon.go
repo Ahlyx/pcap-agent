@@ -1,22 +1,21 @@
 package analyze
 
 import (
+	"fmt"
 	"sync"
 	"time"
 )
 
-// TCPState represents the state of a tracked TCP session.
 type TCPState int
 
 const (
-	StateNew         TCPState = iota
+	StateNew TCPState = iota
 	StateSYN
 	StateSYNACK
 	StateEstablished
 	StateClosed
 )
 
-// TCP flag bit masks matching standard TCP header positions.
 const (
 	tcpFlagFIN = uint8(0x01)
 	tcpFlagSYN = uint8(0x02)
@@ -24,112 +23,195 @@ const (
 	tcpFlagACK = uint8(0x10)
 )
 
-// TCPSession tracks the state of a single TCP session.
-type TCPSession struct {
-	State    TCPState
-	SYNTime  time.Time
-	SeqSeen  map[uint32]int
-	DataSeen bool
-	LastSeen time.Time
+// SessionKey is a stable identity for both directions of a TCP conversation.
+type SessionKey struct {
+	A, B  Endpoint
+	Proto string
 }
 
-// TCPAnomaly describes a detected TCP-level anomaly.
-type TCPAnomaly struct {
-	Subtype string // "syn_flood" | "retransmit" | "rst_injection"
-	Key     FlowKey
-}
-
-// SessionRecon tracks TCP sessions and detects anomalies in real time.
-type SessionRecon struct {
-	mu       sync.Mutex
-	sessions map[FlowKey]*TCPSession
-	halfOpen map[string]int // dst IP → count of half-open (SYN, no SYNACK) sessions
-}
-
-// NewSessionRecon creates a ready-to-use SessionRecon.
-func NewSessionRecon() *SessionRecon {
-	return &SessionRecon{
-		sessions: make(map[FlowKey]*TCPSession),
-		halfOpen: make(map[string]int),
+func CanonicalSessionKey(k FlowKey) SessionKey {
+	a, b := endpointFromKeySrc(k), endpointFromKeyDst(k)
+	if endpointLess(b, a) {
+		a, b = b, a
 	}
+	return SessionKey{A: a, B: b, Proto: k.Proto}
+}
+func (k SessionKey) String() string { return fmt.Sprintf("%s <-> %s (%s)", k.A, k.B, k.Proto) }
+
+type sequenceRange struct{ start, end uint32 }
+
+type TCPSession struct {
+	Initiator, Responder Endpoint
+	State                TCPState
+	SYNTime              time.Time
+	DataSeen             bool
+	LastSeen             time.Time
+	HalfOpen             bool
+	ResetReported        bool
+	RetransmitReported   bool
+	Ranges               map[Endpoint][]sequenceRange
 }
 
-// Record processes a TCP segment for the given flow key and returns any
-// anomalies detected immediately. flags is the raw TCP flags byte.
+type ConnectionAttempt struct {
+	SrcIP   string
+	SrcPort uint16
+	DstIP   string
+	DstPort uint16
+	At      time.Time
+}
+type TCPAnomaly struct {
+	Subtype string
+	Key     FlowKey
+	Count   int
+}
+type TCPRecordResult struct {
+	ConnectionAttempt *ConnectionAttempt
+	Anomalies         []TCPAnomaly
+}
+
+// SessionRecon tracks canonical TCP sessions. It only treats a first
+// SYN-without-ACK as a connection attempt, which deduplicates SYN retransmits.
+type SessionRecon struct {
+	mu                sync.Mutex
+	sessions          map[SessionKey]*TCPSession
+	halfOpen          map[string]map[SessionKey]struct{}
+	pressureReported  map[string]bool
+	HalfOpenThreshold int
+}
+
+func NewSessionRecon() *SessionRecon {
+	return &SessionRecon{sessions: make(map[SessionKey]*TCPSession), halfOpen: make(map[string]map[SessionKey]struct{}), pressureReported: make(map[string]bool), HalfOpenThreshold: 20}
+}
+
+// Record remains a convenience API for callers that do not supply replayable
+// timestamps or payload lengths.
 func (r *SessionRecon) Record(key FlowKey, flags uint8, seq uint32) []TCPAnomaly {
-	now := time.Now()
+	return r.RecordAt(key, flags, seq, 0, time.Now()).Anomalies
+}
+
+func (r *SessionRecon) RecordAt(key FlowKey, flags uint8, seq uint32, payloadLen int, at time.Time) TCPRecordResult {
+	if at.IsZero() {
+		at = time.Now()
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-
-	sess, exists := r.sessions[key]
-	if !exists {
-		sess = &TCPSession{
-			State:    StateNew,
-			SeqSeen:  make(map[uint32]int),
-			LastSeen: now,
-		}
-		r.sessions[key] = sess
-	}
-	sess.LastSeen = now
-
-	var anomalies []TCPAnomaly
-
-	sess.SeqSeen[seq]++
-	if sess.SeqSeen[seq] >= 3 {
-		anomalies = append(anomalies, TCPAnomaly{Subtype: "retransmit", Key: key})
-	}
-
-	syn := flags&tcpFlagSYN != 0
-	ack := flags&tcpFlagACK != 0
-	rst := flags&tcpFlagRST != 0
-	fin := flags&tcpFlagFIN != 0
-
-	switch {
-	case syn && !ack:
-		sess.State = StateSYN
-		sess.SYNTime = now
-		r.halfOpen[key.DstIP]++
-		if r.halfOpen[key.DstIP] > 20 {
-			anomalies = append(anomalies, TCPAnomaly{Subtype: "syn_flood", Key: key})
-		}
-
-	case syn && ack:
-		sess.State = StateSYNACK
-		// SYN+ACK comes from the server (key.SrcIP), so decrement half-open for it.
-		if r.halfOpen[key.SrcIP] > 0 {
-			r.halfOpen[key.SrcIP]--
-		}
-
-	case ack && !syn && !rst && !fin && sess.State == StateSYNACK:
-		sess.State = StateEstablished
-		sess.DataSeen = false
-
-	case rst && sess.State == StateEstablished && sess.DataSeen:
-		anomalies = append(anomalies, TCPAnomaly{Subtype: "rst_injection", Key: key})
-		sess.State = StateClosed
-
-	case fin:
-		sess.State = StateClosed
-	}
-
-	if sess.State == StateEstablished {
-		sess.DataSeen = true
-	}
-
-	return anomalies
+	return r.recordAt(key, flags, seq, payloadLen, at)
 }
 
-// ExpireStale removes sessions whose LastSeen is before cutoff.
+func (r *SessionRecon) recordAt(key FlowKey, flags uint8, seq uint32, payloadLen int, at time.Time) TCPRecordResult {
+	canonical := CanonicalSessionKey(key)
+	src, dst := endpointFromKeySrc(key), endpointFromKeyDst(key)
+	syn, ack := flags&tcpFlagSYN != 0, flags&tcpFlagACK != 0
+	rst, fin := flags&tcpFlagRST != 0, flags&tcpFlagFIN != 0
+	sess, exists := r.sessions[canonical]
+	newAttempt := syn && !ack && (!exists || sess.State == StateClosed)
+	if newAttempt {
+		sess = &TCPSession{Initiator: src, Responder: dst, State: StateSYN, SYNTime: at, LastSeen: at, HalfOpen: true, Ranges: make(map[Endpoint][]sequenceRange)}
+		r.sessions[canonical] = sess
+		r.addHalfOpen(sess, canonical)
+		result := TCPRecordResult{ConnectionAttempt: &ConnectionAttempt{SrcIP: key.SrcIP, SrcPort: key.SrcPort, DstIP: key.DstIP, DstPort: key.DstPort, At: at}}
+		result.Anomalies = r.pressureAnomaly(sess, canonical, key)
+		// SYN is bookkeeping only; it is not classified as a retransmission.
+		return result
+	}
+	if !exists { // Capture started midstream: track safely but infer no attack.
+		sess = &TCPSession{State: StateNew, LastSeen: at, Ranges: make(map[Endpoint][]sequenceRange)}
+		r.sessions[canonical] = sess
+	}
+	sess.LastSeen = at
+	result := TCPRecordResult{}
+
+	if syn && ack && sess.State == StateSYN && src == sess.Responder && dst == sess.Initiator {
+		sess.State = StateSYNACK
+		r.removeHalfOpen(sess, canonical)
+	} else if ack && !syn && !rst && !fin && sess.State == StateSYNACK && src == sess.Initiator && dst == sess.Responder {
+		sess.State = StateEstablished
+	}
+
+	if payloadLen > 0 {
+		sess.DataSeen = true
+	}
+	if sess.State == StateEstablished && payloadLen > 0 && r.recordRange(sess, src, seq, payloadLen, flags) && !sess.RetransmitReported {
+		sess.RetransmitReported = true
+		result.Anomalies = append(result.Anomalies, TCPAnomaly{Subtype: "tcp_retransmission", Key: key, Count: 1})
+	}
+	if rst {
+		if sess.State == StateEstablished && !sess.ResetReported {
+			sess.ResetReported = true
+			result.Anomalies = append(result.Anomalies, TCPAnomaly{Subtype: "tcp_reset", Key: key, Count: 1})
+		}
+		sess.State = StateClosed
+		r.removeHalfOpen(sess, canonical)
+	} else if fin {
+		sess.State = StateClosed
+		r.removeHalfOpen(sess, canonical)
+	}
+	return result
+}
+
+// recordRange only reports fully repeated payload ranges. ACK-only and
+// partially overlapping/out-of-order segments are deliberately ignored.
+func (r *SessionRecon) recordRange(sess *TCPSession, direction Endpoint, seq uint32, payloadLen int, flags uint8) bool {
+	if payloadLen <= 0 {
+		return false
+	}
+	end := seq + uint32(payloadLen)
+	for _, prior := range sess.Ranges[direction] {
+		if prior.start <= seq && prior.end >= end {
+			return true
+		}
+	}
+	sess.Ranges[direction] = append(sess.Ranges[direction], sequenceRange{start: seq, end: end})
+	return false
+}
+
+// Scope pressure by source and destination host, not ephemeral client port.
+func halfOpenScope(s *TCPSession) string { return s.Initiator.IP + "->" + s.Responder.IP }
+func (r *SessionRecon) addHalfOpen(s *TCPSession, key SessionKey) {
+	scope := halfOpenScope(s)
+	if r.halfOpen[scope] == nil {
+		r.halfOpen[scope] = make(map[SessionKey]struct{})
+	}
+	r.halfOpen[scope][key] = struct{}{}
+}
+func (r *SessionRecon) removeHalfOpen(s *TCPSession, key SessionKey) {
+	if !s.HalfOpen {
+		return
+	}
+	scope := halfOpenScope(s)
+	delete(r.halfOpen[scope], key)
+	if len(r.halfOpen[scope]) == 0 {
+		delete(r.halfOpen, scope)
+		delete(r.pressureReported, scope)
+	}
+	s.HalfOpen = false
+}
+func (r *SessionRecon) pressureAnomaly(s *TCPSession, key SessionKey, flow FlowKey) []TCPAnomaly {
+	scope := halfOpenScope(s)
+	count := len(r.halfOpen[scope])
+	if count >= r.HalfOpenThreshold && !r.pressureReported[scope] {
+		r.pressureReported[scope] = true
+		return []TCPAnomaly{{Subtype: "possible_syn_flood", Key: flow, Count: count}}
+	}
+	return nil
+}
+
+// ExpireStale bounds memory and half-open accounting. The caller should pass
+// a capture/replay-aware cutoff (the pipeline uses 30 seconds).
 func (r *SessionRecon) ExpireStale(cutoff time.Time) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-
 	for key, sess := range r.sessions {
 		if sess.LastSeen.Before(cutoff) {
-			if sess.State == StateSYN && r.halfOpen[key.DstIP] > 0 {
-				r.halfOpen[key.DstIP]--
-			}
+			r.removeHalfOpen(sess, key)
 			delete(r.sessions, key)
 		}
 	}
+}
+
+func (r *SessionRecon) ActiveCount() int { r.mu.Lock(); defer r.mu.Unlock(); return len(r.sessions) }
+func (r *SessionRecon) HalfOpenCount(src, dst Endpoint) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.halfOpen[src.IP+"->"+dst.IP])
 }

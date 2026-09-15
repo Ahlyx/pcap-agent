@@ -70,6 +70,19 @@ func runStart(cmd *cobra.Command, args []string) error {
 		log.Printf("auto-selected interface: %s", iface)
 	}
 
+	localIPs := make(map[string]struct{})
+	if selected, err := capture.FindInterface(iface); err != nil {
+		log.Printf("could not identify selected interface addresses; outbound beacon direction is disabled: %v", err)
+	} else {
+		for _, ip := range selected.Addresses {
+			localIPs[ip] = struct{}{}
+		}
+		log.Printf("selected interface: name=%q description=%q addresses=%v", selected.Name, selected.Description, selected.Addresses)
+		if len(localIPs) == 0 {
+			log.Printf("selected interface has no discovered addresses; outbound beacon direction is disabled")
+		}
+	}
+
 	cfg := capture.Config{
 		Interface:   iface,
 		Filter:      capture.DefaultFilter(),
@@ -105,7 +118,7 @@ func runStart(cmd *cobra.Command, args []string) error {
 		fmt.Printf("press Ctrl+C to stop\n")
 
 		cap.Start(pktCh)
-		return runAnalysisPipeline(relayClient.Broadcast, pktCh)
+		return runAnalysisPipeline(relayClient.Broadcast, pktCh, localIPs)
 	}
 
 	// Local mode.
@@ -130,10 +143,10 @@ func runStart(cmd *cobra.Command, args []string) error {
 	log.Printf("capturing on %s  (ws://localhost:%d)", iface, flagPort)
 
 	cap.Start(pktCh)
-	return runAnalysisPipeline(hub.Broadcast, pktCh)
+	return runAnalysisPipeline(hub.Broadcast, pktCh, localIPs)
 }
 
-func runAnalysisPipeline(broadcast func(interface{}), pktCh <-chan gopacket.Packet) error {
+func runAnalysisPipeline(broadcast func(interface{}), pktCh <-chan gopacket.Packet, localIPs map[string]struct{}) error {
 	flows := analyze.NewFlowTable(5 * time.Minute)
 	talkers := analyze.NewTalkerCounter()
 	protos := analyze.NewProtocolCounter()
@@ -141,6 +154,7 @@ func runAnalysisPipeline(broadcast func(interface{}), pktCh <-chan gopacket.Pack
 	portScan := analyze.NewPortScanDetector(analyze.DefaultPortScanConfig())
 	macTracker := analyze.NewMACTracker()
 	sessionRecon := analyze.NewSessionRecon()
+	alerts := ws.NewAlertEmitter(broadcast, time.Minute)
 
 	statsTicker := time.NewTicker(5 * time.Second)
 	alertTicker := time.NewTicker(10 * time.Second)
@@ -158,13 +172,13 @@ func runAnalysisPipeline(broadcast func(interface{}), pktCh <-chan gopacket.Pack
 			if !ok {
 				return nil
 			}
-			processPacket(pkt, broadcast, flows, talkers, protos, beaconing, portScan, macTracker, sessionRecon, &totalPackets, &totalBytes)
+			processPacket(pkt, broadcast, alerts, localIPs, flows, talkers, protos, beaconing, portScan, macTracker, sessionRecon, &totalPackets, &totalBytes)
 
 		case <-statsTicker.C:
 			sendStats(broadcast, totalPackets, totalBytes, talkers, protos, flows)
 
 		case <-alertTicker.C:
-			checkAlerts(broadcast, beaconing, portScan)
+			checkAlerts(alerts, beaconing, portScan)
 
 		case <-expireTicker.C:
 			sessionRecon.ExpireStale(time.Now().Add(-30 * time.Second))
@@ -175,6 +189,8 @@ func runAnalysisPipeline(broadcast func(interface{}), pktCh <-chan gopacket.Pack
 func processPacket(
 	pkt gopacket.Packet,
 	broadcast func(interface{}),
+	alerts *ws.AlertEmitter,
+	localIPs map[string]struct{},
 	flows *analyze.FlowTable,
 	talkers *analyze.TalkerCounter,
 	protos *analyze.ProtocolCounter,
@@ -184,6 +200,10 @@ func processPacket(
 	sessionRecon *analyze.SessionRecon,
 	totalPackets, totalBytes *uint64,
 ) {
+	ts := pkt.Metadata().Timestamp
+	if ts.IsZero() {
+		ts = time.Now()
+	}
 	pktLen := uint64(len(pkt.Data()))
 	*totalPackets++
 	*totalBytes += pktLen
@@ -202,11 +222,10 @@ func processPacket(
 		mac := eth.SrcMAC.String()
 		intel, first := macTracker.Record(mac, srcIP)
 		if first {
-			broadcast(ws.NewMACMessage(intel.MAC, intel.IP, intel.Vendor, intel.Spoofed))
+			broadcast(ws.NewMACMessage(intel.MAC, intel.IP, intel.Vendor, intel.LocallyAdministered))
 		}
 		if ips := macTracker.MultihomeCheck(mac); len(ips) > 1 {
-			msg := ws.NewAlertMessage("mac_multihome", mac, srcIP, len(ips))
-			broadcast(msg)
+			alerts.Emit(ws.NewAlertMessage(ws.AlertID("mac_multi_ip", mac), "mac_multi_ip", ws.SeverityInfo, mac, srcIP, len(ips)))
 		}
 	}
 
@@ -217,9 +236,6 @@ func processPacket(
 		srcPort = uint16(tcp.SrcPort)
 		dstPort = uint16(tcp.DstPort)
 		proto = "TCP"
-		beaconing.Record(srcIP, dstIP)
-		portScan.Record(srcIP, dstIP, dstPort)
-
 		var flags uint8
 		if tcp.SYN {
 			flags |= 0x02
@@ -240,8 +256,30 @@ func processPacket(
 			DstPort: dstPort,
 			Proto:   proto,
 		}
-		for _, anomaly := range sessionRecon.Record(tcpKey, flags, uint32(tcp.Seq)) {
-			broadcast(ws.NewTCPAnomalyMessage(anomaly.Subtype, anomaly.Key.SrcIP, anomaly.Key.DstIP, anomaly.Key.DstPort, 1))
+		recorded := sessionRecon.RecordAt(tcpKey, flags, uint32(tcp.Seq), len(tcp.Payload), ts)
+		if attempt := recorded.ConnectionAttempt; attempt != nil {
+			// Scan evidence uses every unique initial SYN. Cadence is limited to
+			// a known local source so it is never claimed to be outbound otherwise.
+			portScan.RecordAt(attempt.SrcIP, attempt.DstIP, attempt.DstPort, attempt.At)
+			if _, local := localIPs[attempt.SrcIP]; local {
+				beaconing.RecordAt(attempt.SrcIP, attempt.DstIP, attempt.DstPort, attempt.At)
+			}
+		}
+		for _, anomaly := range recorded.Anomalies {
+			severity := ws.SeverityInfo
+			if anomaly.Subtype == "possible_syn_flood" {
+				severity = ws.SeverityWarning
+			}
+			alertID := ws.AlertID(anomaly.Subtype, analyze.CanonicalSessionKey(anomaly.Key).String())
+			if anomaly.Subtype == "possible_syn_flood" {
+				alertID = ws.AlertID(anomaly.Subtype, anomaly.Key.SrcIP, anomaly.Key.DstIP)
+			}
+			msg := ws.NewAlertMessage(alertID, "tcp_anomaly", severity, anomaly.Key.SrcIP, anomaly.Key.DstIP, anomaly.Count)
+			msg.Subtype = anomaly.Subtype
+			msg.SrcPort = anomaly.Key.SrcPort
+			msg.DstPort = anomaly.Key.DstPort
+			msg.Timestamp = ts
+			alerts.Emit(msg)
 		}
 	} else if udp, ok := pkt.Layer(layers.LayerTypeUDP).(*layers.UDP); ok && udp != nil {
 		srcPort = uint16(udp.SrcPort)
@@ -258,7 +296,7 @@ func processPacket(
 		DstPort: dstPort,
 		Proto:   proto,
 	}
-	flows.Update(key, pktLen)
+	flows.UpdateAt(key, pktLen, ts)
 
 	// Emit flow message.
 	broadcast(ws.NewFlowMessage(srcIP, dstIP, srcPort, dstPort, proto, pktLen, 1))
@@ -283,19 +321,22 @@ func sendStats(broadcast func(interface{}), totalPackets, totalBytes uint64, tal
 	broadcast(ws.NewStatsMessage(totalPackets, totalBytes, talkerEntries, protos.Snapshot(), flows.ActiveCount()))
 }
 
-func checkAlerts(broadcast func(interface{}), beaconing *analyze.BeaconingDetector, portScan *analyze.PortScanDetector) {
+func checkAlerts(alerts *ws.AlertEmitter, beaconing *analyze.BeaconingDetector, portScan *analyze.PortScanDetector) {
 	for _, r := range beaconing.Check() {
-		msg := ws.NewAlertMessage("beaconing", r.Src, r.Dst, r.Count)
+		msg := ws.NewAlertMessage(ws.AlertID("periodic_connection", r.Src, r.Dst, fmt.Sprint(r.DstPort)), "periodic_connection", ws.SeverityNotice, r.Src, r.Dst, r.Count)
 		iv := r.IntervalMS
 		msg.IntervalMS = &iv
-		broadcast(msg)
+		jitter := r.JitterPct
+		msg.JitterPct = &jitter
+		msg.DstPort = r.DstPort
+		alerts.Emit(msg)
 	}
 	for _, r := range portScan.Check() {
-		msg := ws.NewAlertMessage("port_scan", r.Src, r.Dst, len(r.PortsHit))
+		msg := ws.NewAlertMessage(ws.AlertID("possible_port_scan", r.Src, r.Dst), "possible_port_scan", ws.SeverityWarning, r.Src, r.Dst, len(r.PortsHit))
 		msg.PortsHit = r.PortsHit
 		w := int(r.Window.Seconds())
 		msg.WindowSeconds = &w
-		broadcast(msg)
+		alerts.Emit(msg)
 	}
 }
 

@@ -41,10 +41,10 @@ var ouiMap = map[string]string{
 
 // MACIntel holds intelligence derived for a single MAC address.
 type MACIntel struct {
-	MAC     string
-	IP      string
-	Vendor  string
-	Spoofed bool
+	MAC                 string
+	IP                  string
+	Vendor              string
+	LocallyAdministered bool
 }
 
 // MACTracker records L2 MAC addresses and their associated IPs.
@@ -85,22 +85,27 @@ func (t *MACTracker) Record(mac, ip string) (MACIntel, bool) {
 	}
 
 	return MACIntel{
-		MAC:     mac,
-		IP:      ip,
-		Vendor:  VendorLookup(mac),
-		Spoofed: IsSpoofed(mac),
+		MAC:                 mac,
+		IP:                  ip,
+		Vendor:              VendorLookup(mac),
+		LocallyAdministered: IsLocallyAdministered(mac),
 	}, first
 }
 
-// IsSpoofed returns true if the locally administered bit (0x02) is set in the
-// first octet of the MAC, indicating a non-burned-in address.
-func IsSpoofed(mac string) bool {
+// IsLocallyAdministered reports the MAC address property represented by bit 1
+// of the first octet. It does not establish that an address was spoofed.
+func IsLocallyAdministered(mac string) bool {
 	hw, err := net.ParseMAC(mac)
 	if err != nil || len(hw) == 0 {
 		return false
 	}
 	return hw[0]&0x02 != 0
 }
+
+// IsSpoofed is retained for callers compiled against older versions. The
+// result is only the locally administered bit and must not be treated as proof
+// of spoofing.
+func IsSpoofed(mac string) bool { return IsLocallyAdministered(mac) }
 
 // VendorLookup returns the vendor name for a MAC by matching its OUI prefix
 // (first 8 characters, e.g. "00:0c:29"), or "Unknown" if not in the table.

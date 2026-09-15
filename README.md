@@ -1,233 +1,214 @@
 # pcap-agent
 
-> Real-time network packet capture and threat detection with a live browser dashboard.
+`pcap-agent` is a local Go program that captures selected network-interface traffic, summarizes packet metadata in memory, and streams those summaries to a browser dashboard over a local WebSocket. It is intended for visibility and investigation, not as a replacement for an IDS, firewall, or endpoint-security product.
 
-**Part of [Ahlyx Labs](https://ahlyxlabs.com) — security tooling platform.**
+Raw packet payloads are not sent in WebSocket messages and the agent does not write capture data to disk. The default capture filter is `tcp or udp or icmp`, and it is installed in libpcap before packets enter the analysis pipeline.
 
----
+## What it currently does
 
-![Go](https://img.shields.io/badge/go-1.22+-00ADD8?logo=go&logoColor=white)
-![License](https://img.shields.io/github/license/Ahlyx/pcap-agent)
-![CI](https://github.com/Ahlyx/pcap-agent/actions/workflows/ci.yml/badge.svg)
-![Release](https://img.shields.io/github/v/release/Ahlyx/pcap-agent)
+- Captures TCP, UDP, and ICMP traffic through libpcap/Npcap.
+- Lists capture interfaces and can use an explicitly selected interface.
+- Streams individual flow observations, DNS query/answer visibility, traffic statistics, and top talkers to a dashboard.
+- Tracks TCP conversations and reports informational TCP retransmission or reset observations.
+- Identifies periodic **connection-attempt** patterns and possible vertical port scans using conservative heuristics.
+- Emits Ethernet MAC vendor lookup information and whether an address is locally administered.
+- Counts transport/network protocols; the dashboard highlights flows whose destination ports are in its built-in OT/ICS port list.
+- Supports a local WebSocket mode and an opt-in relay mode.
 
----
+The detection output is heuristic. A periodic connection, retransmission, reset, locally administered MAC, multi-IP MAC mapping, SYN pressure, or possible port scan is not automatically malicious. Normal browsers, cloud clients, VPNs, virtual machines, Wi-Fi privacy features, lossy links, and ordinary service discovery can all create these observations. DNS support is packet/query visibility only; this agent does **not** claim to detect DNS tunneling. The enrichment package is not currently wired into the capture pipeline, so no threat-intelligence lookup is advertised here.
 
-## Dashboard
+## Supported platforms
 
-The browser dashboard shows live packet flows, protocol breakdown, top talkers by volume, beaconing and port scan alerts, and threat enrichment results for public IPs — all streaming in real time as traffic passes through your interface.
+The source and release workflow support 64-bit Windows, Linux, and macOS. Capture depends on the platform packet-capture library and permission model:
 
-```
-pcap-agent v0.1.0
-interface:  ens33
-mode:       local
-session:    b3690d89
-websocket:  ws://localhost:7777/ws
-dashboard:  open ahlyxlabs.com/pcap in your browser
-press Ctrl+C to stop
-```
+| Platform | Capture dependency | Typical capture permission |
+| --- | --- | --- |
+| Windows | [Npcap](https://npcap.com/) | Run an elevated PowerShell or Windows Terminal. |
+| Linux | libpcap development package | Root, or a deliberately configured capture capability/group. |
+| macOS | System libpcap (or Homebrew libpcap if required by your toolchain) | Run from an administrator-capable account; `sudo` may be required for live capture. |
 
----
+Go 1.22 or newer and CGO are required to build the capture binary from source. A C compiler and libpcap headers must be available to CGO.
 
-## How it works
+## Windows setup
 
-Download the binary and run it locally with `sudo`. The agent opens a raw socket on your chosen interface, captures packets, and runs analysis entirely on your machine — no cloud required. Results are streamed to a WebSocket server on `localhost:7777`.
+1. Install Go 1.22+ from [go.dev](https://go.dev/dl/).
+2. Install [Npcap](https://npcap.com/). Its default compatibility settings work for most users; install it before running the agent.
+3. Open **PowerShell or Windows Terminal as Administrator**. Do not use `sudo` on Windows.
+4. Clone, build, select an interface, then start capture:
 
-Open [ahlyxlabs.com/pcap](https://ahlyxlabs.com/pcap) in your browser and it connects automatically. The dashboard updates in real time as traffic flows. No raw packet data leaves your machine — the agent transmits flow metadata only (src IP, dst IP, port, protocol, byte count).
-
----
-
-## Prerequisites
-
-### Linux
-```bash
-sudo apt-get install -y libpcap-dev
-# Must run with sudo for raw packet capture
-```
-
-### macOS
-```bash
-brew install libpcap
-# Must run with sudo for raw packet capture
+```powershell
+git clone https://github.com/Ahlyx/pcap-agent.git
+Set-Location pcap-agent
+go build -ldflags="-s -w" -o pcap-agent.exe ./cmd/agent
+.\pcap-agent.exe list-interfaces
+.\pcap-agent.exe start --interface "<Npcap interface name>"
 ```
 
-### Windows
+Npcap interface names may be long device paths (for example `\Device\NPF_{...}`). Copy the name printed by `list-interfaces` exactly.
 
-1. Download and install **Npcap** from [https://npcap.com](https://npcap.com) (free — same as Wireshark uses)
-2. Must run as **Administrator**
+## Linux setup
 
----
-
-## Installation
-
-### Option 1 — Download binary (recommended)
-
-Download the latest release from [github.com/Ahlyx/pcap-agent/releases/latest](https://github.com/Ahlyx/pcap-agent/releases/latest):
-
-| Platform | File |
-|---|---|
-| Linux (amd64) | `pcap-agent-linux-amd64` |
-| Windows (amd64) | `pcap-agent-windows-amd64.exe` |
-| macOS (Intel) | `pcap-agent-darwin-amd64` |
-| macOS (Apple Silicon) | `pcap-agent-darwin-arm64` |
-
-### Option 2 — Build from source
+Install Go 1.22+, a C compiler, and libpcap development headers. On Debian/Ubuntu:
 
 ```bash
-# Requires Go 1.22+ and libpcap-dev
+sudo apt-get update
+sudo apt-get install -y build-essential libpcap-dev
+```
+
+On Fedora/RHEL, use `sudo dnf install gcc libpcap-devel`; on Arch, use `sudo pacman -S base-devel libpcap`.
+
+Then clone and build:
+
+```bash
 git clone https://github.com/Ahlyx/pcap-agent.git
 cd pcap-agent
-go build -o pcap-agent ./cmd/agent
+go build -ldflags='-s -w' -o pcap-agent ./cmd/agent
+sudo ./pcap-agent list-interfaces
+sudo ./pcap-agent start --interface eth0
 ```
 
----
+Live capture normally requires root privileges. Advanced users may instead grant narrowly scoped capture privileges according to their distribution’s security policy; the agent does not configure those permissions for you.
 
-## Usage
+## macOS setup
+
+Install Go 1.22+. macOS includes libpcap, but a Homebrew installation can help when your compiler cannot find usable headers:
 
 ```bash
-# List available interfaces
+brew install libpcap
+```
+
+Build and run from the repository:
+
+```bash
+git clone https://github.com/Ahlyx/pcap-agent.git
+cd pcap-agent
+go build -ldflags='-s -w' -o pcap-agent ./cmd/agent
 sudo ./pcap-agent list-interfaces
+sudo ./pcap-agent start --interface en0
+```
 
-# Start with auto-detected interface (local mode)
-sudo ./pcap-agent start
+macOS commonly requires elevated privileges to open a live capture device. If access is denied, rerun only the capture command with `sudo`; confirm that the selected interface is the active Wi-Fi/Ethernet adapter.
 
-# Start on a specific interface
+## Prebuilt binaries
+
+Tagged releases are configured to publish Windows amd64, Linux amd64, macOS Intel, and macOS Apple Silicon binaries. If a suitable release asset is available, download it from the [latest release](https://github.com/Ahlyx/pcap-agent/releases/latest), unpack it, install the platform capture dependency above, and run the same `list-interfaces` / `start` commands. You do not need Go to use a prebuilt binary.
+
+## Using the agent
+
+### Choose an interface
+
+Always inspect available capture interfaces before relying on auto-selection:
+
+```powershell
+# Windows (elevated PowerShell)
+.\pcap-agent.exe list-interfaces
+```
+
+```bash
+# Linux/macOS, where your capture policy requires elevation
+sudo ./pcap-agent list-interfaces
+```
+
+`start` can select an interface automatically, but automatic selection uses the first non-loopback adapter with an address. On systems with VPN, Hyper-V, VMware, VirtualBox, WSL, containers, or overlays, explicitly pass `--interface` and verify the startup log’s interface description and addresses.
+
+### Start local mode
+
+Local mode is the default. It starts an HTTP/WebSocket listener on the selected port (default `7777`), with WebSocket endpoint **`ws://localhost:7777/ws`** and health endpoint `http://localhost:7777/`. Browser and agent must run on the same machine for the bundled dashboard configuration.
+
+```powershell
+# Windows (run from an elevated PowerShell/Terminal)
+.\pcap-agent.exe start --interface "<Npcap interface name>"
+.\pcap-agent.exe start --interface "<Npcap interface name>" --port 8888
+```
+
+```bash
+# Linux/macOS
 sudo ./pcap-agent start --interface eth0
-
-# Start on a custom WebSocket port
-sudo ./pcap-agent start --port 8888
-
-# Start in relay mode (streams via api.ahlyxlabs.com)
-sudo ./pcap-agent start --relay
+sudo ./pcap-agent start --interface en0 --port 8888
 ```
 
-Then open [ahlyxlabs.com/pcap](https://ahlyxlabs.com/pcap) in your browser.
+When using a port other than 7777, update the dashboard’s `WS_URL` in `static/app.js` before serving/opening that dashboard.
 
----
+### Dashboard
 
-## Modes
+The agent serves the local WebSocket and health response; it does not serve the dashboard HTML. The checked-in dashboard is [static/index.html](static/index.html), configured for `ws://localhost:7777/ws`. Open or serve that static file from the same computer after the agent is running. The hosted Ahlyx Labs PCAP page is also intended to connect to the local agent when deployed/configured for it.
 
-### Local mode (default)
+The dashboard shows flow observations, DNS query/answer metadata, counters, protocol distribution, and alerts. Alert IDs are stable and duplicate updates modify one rendered row instead of incrementing the unique alert count.
 
-- WebSocket server runs on `localhost:7777`
-- Browser connects directly to your machine
-- Zero data leaves your machine
-- Both browser and agent must be on the same machine
+### Relay mode
 
-### Relay mode (`--relay`)
+`--relay` asks for explicit confirmation before requesting a relay session from `https://api.ahlyxlabs.com`. It sends flow metadata to the relay rather than using the local WebSocket, and prints a session-specific dashboard URL. Only use it when you intentionally want this remote relay behavior:
 
-- Agent connects outbound to `api.ahlyxlabs.com`
-- Browser connects to the same session from anywhere
-- Only flow metadata transmitted — no packet payloads, ever
-- Useful when the agent runs on a server or VM you are monitoring remotely
-- Prints a warning and requires confirmation before starting:
-
-```
-WARNING: relay mode enabled — connection metadata will be transmitted
-to api.ahlyxlabs.com. No packet payloads are ever transmitted,
-only flow summaries (src IP, dst IP, port, protocol, byte count).
-Press ENTER to continue or Ctrl+C to cancel.
+```powershell
+.\pcap-agent.exe start --relay --interface "<Npcap interface name>"
 ```
 
----
+```bash
+sudo ./pcap-agent start --relay --interface eth0
+```
 
-## Detection
+## Detection notes
 
-| Detection | Description |
-|---|---|
-| Beaconing | Regular-interval outbound connections — C2 indicator |
-| Port scanning | Single host hitting 15+ unique ports in 10 seconds |
-| DNS tunneling | Excessively long subdomains, high NXDOMAIN rate |
-| OT/ICS exposure | Modbus, S7comm, DNP3, EtherNet/IP, BACnet and 9 more |
-| Threat enrichment | Auto-lookup of public IPs via Ahlyx Labs enrichment API |
+| Observation | Current meaning |
+| --- | --- |
+| Periodic connection | A local-origin, unique TCP connection attempt repeats to the same destination service at low jitter over a minimum observation period. It is a `notice`, not proof of C2. |
+| Possible port scan | One source makes unique initial TCP attempts to at least 15 destination ports on one destination within 10 seconds. It is a `warning`, not a confirmed scan. Horizontal scans are not covered. |
+| Possible SYN flood / SYN pressure | A bounded number of unique half-open TCP sessions reaches the configured threshold. SYN retransmissions do not add to that count. |
+| TCP retransmission | A repeated TCP data/sequence range; ACK-only packets are ignored. Retransmission is normal on imperfect networks and is informational. |
+| TCP reset | A reset observed for a tracked session. It is informational; the agent does not infer RST injection. |
+| MAC observation | Vendor lookup plus the locally administered-address bit. Locally administered does not mean spoofed. A MAC with multiple IPv4 addresses is informational only. |
+| DNS visibility | Parsed DNS question and available answer metadata. No DNS-tunneling conclusion is made. |
 
-**Beaconing** is flagged when a src→dst pair has 5+ connections with interval variance below 20%. Common C2 intervals (30 s, 60 s, 300 s, 3600 s) are caught reliably.
+No `critical` alert is generated by a single routine heuristic. Severity is intentionally conservative: `info`, `notice`, and `warning` are not evidence of confirmed compromise.
 
-**Enrichment** lookups hit `api.ahlyxlabs.com/api/v1/ip/{address}` for each new public IP seen. Results are cached for 1 hour. Private and bogon ranges are never queried. Rate-limited to 5 lookups per minute.
+## Troubleshooting
 
----
+**No interfaces found** — Verify Npcap is installed on Windows, or libpcap is installed on Linux/macOS. Run the terminal with the capture permissions described above. VPN/VM adapters are often visible even when the physical adapter is not; reinstall/update Npcap if Windows returns no adapters.
 
-## OT/ICS Port Coverage
+**Wrong interface selected** — Run `list-interfaces` and pass the exact name to `start --interface ...`. Auto-selection is intentionally simple and can choose a virtual adapter.
 
-Traffic on any of the following ports is flagged with a ⚠ OT marker in the flow table and included in the protocol breakdown:
+**Permission or capture-open error** — On Windows, reopen PowerShell/Terminal as Administrator. On Linux, run the capture command with `sudo` or arrange your distribution’s libpcap capabilities. On macOS, try the capture command with `sudo` and check macOS privacy/security policy.
 
-| Protocol | Port |
-|---|---|
-| Modbus | 502 |
-| Siemens S7comm | 102 |
-| EtherNet/IP | 44818 |
-| EtherNet/IP (alt) | 2222 |
-| OPC-UA | 4840 |
-| DNP3 | 20000 |
-| BACnet | 47808 |
-| OMRON FINS | 9600 |
-| PCWorx | 1962 |
-| GE SRTP | 18245 |
-| Emerson DeltaV | 4000 |
-| FOUNDATION Fieldbus (SM) | 1089 |
-| FOUNDATION Fieldbus (FMS) | 1090 |
-| FOUNDATION Fieldbus | 1091 |
+**Npcap missing on Windows** — Install Npcap, then close and reopen the elevated terminal. `pcap-agent.exe list-interfaces` should show Npcap adapters. A Go build may succeed without Npcap, but live capture will not.
 
----
+**Build failure mentioning libpcap or CGO** — Install the platform development headers and a C compiler, then ensure `CGO_ENABLED` is not disabled. Linux needs `libpcap-dev`/`libpcap-devel`; macOS may need Homebrew `libpcap`; Windows source builds need a CGO-compatible toolchain and Npcap SDK/libpcap headers. Prebuilt release binaries avoid the source-build toolchain requirement but still need a capture driver/runtime.
 
-## Privacy
-
-- **Local mode:** no data leaves your machine under any circumstances
-- **Relay mode:** flow summaries only — src IP, dst IP, port, protocol, byte count — no payloads
-- **Enrichment lookups:** public IPs only, results cached locally for 1 hour
-- **Nothing is stored to disk** — the agent is fully stateless
-
----
+**Dashboard cannot connect** — Start the agent first, confirm `http://localhost:7777/` returns JSON, and make sure the dashboard’s `WS_URL` is `ws://localhost:7777/ws`. For a custom `--port`, change `WS_URL` to the same port. Browser and agent must be on the same machine in local mode; mixed-content browser policy can also block `ws://` from an HTTPS-hosted page unless that deployment handles the local connection appropriately.
 
 ## Development
 
 ```bash
-# Install dependencies
+# Synchronize module metadata when dependencies change.
 go mod tidy
 
-# Run tests
+# Format, test, inspect, and build.
+gofmt -w .
 go test ./...
-
-# Build all platforms (handled by GitHub Actions on tag push)
-git tag v0.x.x
-git push origin v0.x.x
+go vet ./...
+go build -ldflags='-s -w' -o pcap-agent ./cmd/agent
 ```
 
-CI runs on every push to `main`. Release binaries for all four platforms are built automatically when a `v*` tag is pushed.
+CI installs libpcap on Linux and builds/tests the project. Release CI builds the four platform assets described above when a `v*` tag is pushed.
 
----
+## Layout
 
-## Architecture
-
-```
-pcap-agent/
-├── cmd/agent/
-│   ├── main.go         entry point
-│   └── cli.go          cobra commands: start, list-interfaces
-├── capture/
-│   ├── capture.go      gopacket/libpcap capture loop
-│   ├── interfaces.go   interface enumeration and auto-selection
-│   └── filter.go       BPF filter construction
-├── analyze/
-│   ├── flows.go        flow table with idle-timeout expiry
-│   ├── beaconing.go    regular-interval connection detection
-│   ├── port_scan.go    sliding-window distinct-port counter
-│   ├── top_talkers.go  per-IP byte counter, TopN ranking
-│   ├── dns.go          DNS query/response extraction
-│   ├── protocols.go    per-protocol packet counter
-│   └── enrichment.go   public IP enrichment with local cache
-├── ws/
-│   ├── server.go       HTTP server, /ws upgrade handler, /health
-│   ├── hub.go          client registry, broadcast channel, drop-on-slow
-│   └── messages.go     JSON message structs (flow, alert, dns, stats, enrichment, status)
-├── session/
-│   └── session.go      8-char hex session ID via crypto/rand
-└── tests/
+```text
+cmd/agent/  Cobra CLI and analysis pipeline
+capture/    libpcap/Npcap interface discovery, BPF filtering, capture loop
+analyze/    flow, TCP-session, cadence, scan, DNS, MAC, and statistics logic
+ws/         local WebSocket hub/server and relay client
+static/     browser dashboard assets (not served by the agent)
+session/    local session identifier helper
 ```
 
-**Dependencies:** `github.com/google/gopacket` · `github.com/gorilla/websocket` · `github.com/spf13/cobra`
+## Limitations
 
----
+- Capturing depends on local driver support and privilege; encrypted protocols are summarized from metadata, not decrypted.
+- The default BPF filter excludes non-TCP/UDP/ICMP traffic before analysis.
+- Auto interface selection is not default-route aware.
+- Flow messages are emitted per observed packet; aggregate flow state is used for counts/statistics.
+- The checked-in dashboard does not yet render standalone MAC messages.
+- Detection is local, heuristic, and intentionally conservative. Review packet context and endpoint ownership before acting.
 
 ## License
 

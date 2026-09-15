@@ -68,6 +68,7 @@ let ws             = null;
 let reconnectTimer = null;
 let threatIPs      = new Set();
 let statsData      = { packets: 0, bytes: 0, flows: 0, alerts: 0 };
+const renderedAlerts = new Map();
 
 // ---------------------------------------------------------------------------
 // Connection management
@@ -205,38 +206,54 @@ function addAlert(msg) {
     const empty = list.querySelector('.panel-empty');
     if (empty) list.removeChild(empty);
 
-    const entry = document.createElement('div');
-    entry.className = 'alert-entry';
-
-    const textSpan = document.createElement('span');
-    const timeSpan = document.createElement('span');
-    timeSpan.className = 'alert-time';
-    timeSpan.textContent = formatTime(null);
-
-    if (msg.alert_type === 'beaconing') {
-        const interval = msg.interval_ms != null ? msg.interval_ms.toFixed(0) : '?';
-        textSpan.textContent = '⚠ BEACONING — ' + msg.src + ' → ' + msg.dst +
-            ' — interval: ' + interval + 'ms × ' + msg.count + ' connections';
-    } else if (msg.alert_type === 'port_scan') {
-        const ports = Array.isArray(msg.ports_hit) ? msg.ports_hit.length : '?';
-        const win   = msg.window_seconds != null ? msg.window_seconds : '?';
-        textSpan.textContent = '⚠ PORT SCAN — ' + msg.src +
-            ' — ' + ports + ' unique ports in ' + win + 's';
-    } else {
-        textSpan.textContent = '⚠ ' + (msg.alert_type || 'ALERT').toUpperCase() +
-            ' — ' + msg.src + ' → ' + msg.dst;
+    const id = msg.id || [msg.alert_type, msg.subtype, msg.src, msg.dst].join('|');
+    let rendered = renderedAlerts.get(id);
+    if (!rendered) {
+        const entry = document.createElement('div');
+        const textSpan = document.createElement('span');
+        const timeSpan = document.createElement('span');
+        timeSpan.className = 'alert-time';
+        entry.appendChild(textSpan);
+        entry.appendChild(timeSpan);
+        rendered = { entry: entry, text: textSpan, time: timeSpan };
+        renderedAlerts.set(id, rendered);
+        list.insertBefore(entry, list.firstChild);
+        statsData.alerts++;
+        updateStatsDisplay();
     }
 
-    entry.appendChild(textSpan);
-    entry.appendChild(timeSpan);
-    list.insertBefore(entry, list.firstChild);
+    const severity = (msg.severity || 'warning').toLowerCase();
+    rendered.entry.className = 'alert-entry severity-' + severity;
+    rendered.time.textContent = formatTime(msg.timestamp);
+    rendered.text.textContent = alertText(msg, severity);
 
     while (list.children.length > MAX_ALERTS) {
-        list.removeChild(list.lastChild);
+        const removed = list.lastChild;
+        for (const [alertID, rendered] of renderedAlerts.entries()) {
+            if (rendered.entry === removed) renderedAlerts.delete(alertID);
+        }
+        list.removeChild(removed);
     }
 
-    statsData.alerts++;
-    updateStatsDisplay();
+}
+
+function alertText(msg, severity) {
+    const label = severity.toUpperCase();
+    if (msg.alert_type === 'periodic_connection') {
+        const interval = msg.interval_ms != null ? msg.interval_ms.toFixed(0) : '?';
+        return label + ' periodic connection — ' + msg.src + ' → ' + msg.dst + ':' +
+            (msg.dst_port || '?') + ' — ' + interval + 'ms × ' + (msg.count || '?');
+    }
+    if (msg.alert_type === 'possible_port_scan') {
+        const ports = Array.isArray(msg.ports_hit) ? msg.ports_hit.length : '?';
+        return label + ' possible port scan — ' + msg.src + ' → ' + msg.dst +
+            ' — ' + ports + ' unique ports in ' + (msg.window_seconds || '?') + 's';
+    }
+    if (msg.subtype === 'tcp_retransmission') return label + ' TCP retransmission — ' + msg.src + ' → ' + msg.dst;
+    if (msg.subtype === 'tcp_reset') return label + ' TCP reset — ' + msg.src + ' → ' + msg.dst;
+    if (msg.subtype === 'possible_syn_flood') return label + ' possible SYN flood — ' + msg.src + ' → ' + msg.dst + ' — ' + (msg.count || '?') + ' half-open sessions';
+    if (msg.alert_type === 'mac_multi_ip') return label + ' MAC observed with multiple IPs — ' + msg.src;
+    return label + ' ' + (msg.subtype || msg.alert_type || 'alert').replaceAll('_', ' ') + ' — ' + (msg.src || '') + ' → ' + (msg.dst || '');
 }
 
 // ---------------------------------------------------------------------------

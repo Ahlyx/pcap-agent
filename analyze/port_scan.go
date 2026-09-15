@@ -1,95 +1,87 @@
 package analyze
 
 import (
+	"sort"
 	"sync"
 	"time"
 )
 
-// PortScanConfig controls detection thresholds.
 type PortScanConfig struct {
-	// PortThreshold is how many distinct ports must be hit to trigger an alert.
 	PortThreshold int
-	// Window is the time window over which hits are counted.
-	Window time.Duration
+	Window        time.Duration
 }
 
-// DefaultPortScanConfig returns sensible defaults.
 func DefaultPortScanConfig() PortScanConfig {
-	return PortScanConfig{
-		PortThreshold: 15,
-		Window:        60 * time.Second,
-	}
+	return PortScanConfig{PortThreshold: 15, Window: 10 * time.Second}
 }
 
 type portHit struct {
 	port uint16
 	at   time.Time
 }
-
-// PortScanDetector tracks connection attempts per (src, dst) pair.
+type scanKey struct{ src, dst string }
 type PortScanDetector struct {
 	mu      sync.Mutex
 	cfg     PortScanConfig
-	history map[string][]portHit // key: "src->dst"
+	history map[scanKey][]portHit
 }
 
-// NewPortScanDetector creates a detector with the given config.
 func NewPortScanDetector(cfg PortScanConfig) *PortScanDetector {
-	return &PortScanDetector{
-		cfg:     cfg,
-		history: make(map[string][]portHit),
-	}
+	return &PortScanDetector{cfg: cfg, history: make(map[scanKey][]portHit)}
 }
-
-// Record notes a connection attempt from src to dst:port.
 func (d *PortScanDetector) Record(src, dst string, port uint16) {
-	key := src + "->" + dst
-	now := time.Now()
-	cutoff := now.Add(-d.cfg.Window)
-
+	d.RecordAt(src, dst, port, time.Now())
+}
+func (d *PortScanDetector) RecordAt(src, dst string, port uint16, at time.Time) {
+	if at.IsZero() {
+		at = time.Now()
+	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
-
-	hits := d.history[key]
-	valid := hits[:0]
-	for _, h := range hits {
-		if h.at.After(cutoff) {
-			valid = append(valid, h)
-		}
-	}
-	valid = append(valid, portHit{port: port, at: now})
-	d.history[key] = valid
+	k := scanKey{src: src, dst: dst}
+	d.history[k] = append(pruneHits(d.history[k], at.Add(-d.cfg.Window)), portHit{port: port, at: at})
 }
 
-// PortScanResult holds detection output for a scanning source.
 type PortScanResult struct {
-	Src      string
-	Dst      string
+	Src, Dst string
 	PortsHit []uint16
 	Window   time.Duration
 }
 
-// Check returns scan results for any (src, dst) pair exceeding the port threshold.
-func (d *PortScanDetector) Check() []PortScanResult {
+func (d *PortScanDetector) Check() []PortScanResult { return d.CheckAt(time.Now()) }
+func (d *PortScanDetector) CheckAt(now time.Time) []PortScanResult {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-
-	var results []PortScanResult
-	for key, hits := range d.history {
-		distinct := distinctPorts(hits)
-		if len(distinct) >= d.cfg.PortThreshold {
-			src, dst := splitKey(key)
-			results = append(results, PortScanResult{
-				Src:      src,
-				Dst:      dst,
-				PortsHit: distinct,
-				Window:   d.cfg.Window,
-			})
+	results := make([]PortScanResult, 0)
+	for k, old := range d.history {
+		hits := pruneHits(old, now.Add(-d.cfg.Window))
+		if len(hits) == 0 {
+			delete(d.history, k)
+			continue
+		}
+		d.history[k] = hits
+		ports := distinctPorts(hits)
+		if len(ports) >= d.cfg.PortThreshold {
+			results = append(results, PortScanResult{Src: k.src, Dst: k.dst, PortsHit: ports, Window: d.cfg.Window})
 		}
 	}
+	sort.Slice(results, func(i, j int) bool {
+		if results[i].Src != results[j].Src {
+			return results[i].Src < results[j].Src
+		}
+		return results[i].Dst < results[j].Dst
+	})
 	return results
 }
-
+func pruneHits(hits []portHit, cutoff time.Time) []portHit {
+	valid := hits[:0]
+	for _, h := range hits {
+		if !h.at.Before(cutoff) {
+			valid = append(valid, h)
+		}
+	}
+	return valid
+}
 func distinctPorts(hits []portHit) []uint16 {
 	seen := make(map[uint16]struct{})
 	for _, h := range hits {
@@ -99,5 +91,6 @@ func distinctPorts(hits []portHit) []uint16 {
 	for p := range seen {
 		out = append(out, p)
 	}
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
 	return out
 }
