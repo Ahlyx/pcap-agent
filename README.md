@@ -97,12 +97,28 @@ macOS commonly requires elevated privileges to open a live capture device. If ac
 
 ## Prebuilt binaries
 
-Tagged releases are configured to publish Windows amd64 (`pcap-agent.exe`), Linux amd64, macOS Intel, and macOS Apple Silicon binaries. If a suitable release asset is available, download it from the [latest release](https://github.com/Ahlyx/pcap-agent/releases/latest), unpack it, install the platform capture dependency above, and run the normal `start` command. You do not need Go to use a prebuilt binary.
+Tagged releases publish one archive for each supported platform. Download the appropriate archive from the [latest release](https://github.com/Ahlyx/pcap-agent/releases/latest), extract it, install the platform capture dependency above, and run the normal `start` command. You do not need Go to use a prebuilt binary.
+
+| Platform | Release asset | Extracted executable |
+| --- | --- | --- |
+| Windows | `pcap-agent-windows.zip` | `pcap-agent.exe` |
+| Linux | `pcap-agent-linux.tar.gz` | `pcap-agent` |
+| macOS — Intel | `pcap-agent-macos-intel.tar.gz` | `pcap-agent` |
+| macOS — Apple Silicon | `pcap-agent-macos-apple-silicon.tar.gz` | `pcap-agent` |
+
+After extraction, open a terminal in the extracted folder. Automatic interface selection is the normal workflow:
 
 ```powershell
 # Windows (elevated PowerShell)
 .\pcap-agent start
 ```
+
+```bash
+# Linux/macOS (use sudo only when your capture policy requires elevation)
+./pcap-agent start
+```
+
+The Linux and macOS archives preserve the executable bit. If you extracted them with a tool that removed it, restore it once with `chmod +x pcap-agent`.
 
 ## Using the agent
 
@@ -116,8 +132,8 @@ Tagged releases are configured to publish Windows amd64 (`pcap-agent.exe`), Linu
 ```
 
 ```bash
-# Linux/macOS, where your capture policy requires elevation
-sudo ./pcap-agent start
+# Linux/macOS
+./pcap-agent start
 ```
 
 ### Advanced: choose an interface
@@ -130,8 +146,8 @@ On systems with VPN, Hyper-V, VMware, VirtualBox, WSL, containers, or overlays, 
 ```
 
 ```bash
-# Linux/macOS, where your capture policy requires elevation
-sudo ./pcap-agent list-interfaces
+# Linux/macOS
+./pcap-agent list-interfaces
 ```
 
 Automatic selection is intentionally simple. When selecting an interface explicitly, verify the startup log’s interface description and addresses.
@@ -147,9 +163,9 @@ Local mode is the default. It starts an HTTP/WebSocket listener on the selected 
 ```
 
 ```bash
-# Linux/macOS
-sudo ./pcap-agent start --interface eth0
-sudo ./pcap-agent start --interface en0 --port 8888
+# Linux/macOS (add sudo only when your capture policy requires elevation)
+./pcap-agent start --interface eth0
+./pcap-agent start --interface en0 --port 8888
 ```
 
 When using a port other than 7777, update the dashboard’s `WS_URL` in `static/app.js` before serving/opening that dashboard.
@@ -169,7 +185,7 @@ The dashboard shows flow observations, DNS query/answer metadata, counters, prot
 ```
 
 ```bash
-sudo ./pcap-agent start --relay --interface eth0
+./pcap-agent start --relay --interface eth0
 ```
 
 ## Detection notes
@@ -213,7 +229,7 @@ go vet ./...
 go build -ldflags='-s -w' -o pcap-agent ./cmd/agent
 ```
 
-CI installs libpcap on Linux and builds/tests the project. Release CI builds the four platform assets described above when a `v*` tag is pushed.
+CI installs libpcap on Linux and builds/tests the project. Release CI packages the four platform archives described above when a `v*` tag is pushed.
 
 ## Layout
 

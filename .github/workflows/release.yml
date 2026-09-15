@@ -13,19 +13,23 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
-            output: pcap-agent-linux-amd64
+            binary: pcap-agent
+            asset: pcap-agent-linux.tar.gz
             goos: linux
             goarch: amd64
           - os: windows-latest
-            output: pcap-agent.exe
+            binary: pcap-agent.exe
+            asset: pcap-agent-windows.zip
             goos: windows
             goarch: amd64
           - os: macos-latest
-            output: pcap-agent-darwin-amd64
+            binary: pcap-agent
+            asset: pcap-agent-macos-intel.tar.gz
             goos: darwin
             goarch: amd64
           - os: macos-latest
-            output: pcap-agent-darwin-arm64
+            binary: pcap-agent
+            asset: pcap-agent-macos-apple-silicon.tar.gz
             goos: darwin
             goarch: arm64
 
@@ -51,13 +55,22 @@ jobs:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: 1
-        run: go build -ldflags="-s -w" -o ${{ matrix.output }} ./cmd/agent
+        run: go build -ldflags="-s -w" -o ${{ matrix.binary }} ./cmd/agent
+
+      - name: Package Windows binary
+        if: matrix.goos == 'windows'
+        shell: pwsh
+        run: Compress-Archive -Path '${{ matrix.binary }}' -DestinationPath '${{ matrix.asset }}'
+
+      - name: Package Unix binary
+        if: matrix.goos != 'windows'
+        run: tar -czf '${{ matrix.asset }}' '${{ matrix.binary }}'
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.output }}
-          path: ${{ matrix.output }}
+          name: ${{ matrix.asset }}
+          path: ${{ matrix.asset }}
 
   release:
     name: Create Release
@@ -76,8 +89,8 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            pcap-agent-linux-amd64
-            pcap-agent.exe
-            pcap-agent-darwin-amd64
-            pcap-agent-darwin-arm64
+            pcap-agent-windows.zip
+            pcap-agent-linux.tar.gz
+            pcap-agent-macos-intel.tar.gz
+            pcap-agent-macos-apple-silicon.tar.gz
           generate_release_notes: true
