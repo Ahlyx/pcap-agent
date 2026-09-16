@@ -154,7 +154,7 @@ Automatic selection is intentionally simple. When selecting an interface explici
 
 ### Start local mode
 
-Local mode is the default. It starts an HTTP/WebSocket listener on the selected port (default `7777`), with WebSocket endpoint **`ws://localhost:7777/ws`** and health endpoint `http://localhost:7777/`. Browser and agent must run on the same machine when using a local WebSocket client or the Ahlyx Labs PCAP page.
+Local mode is the default. It starts an HTTP/WebSocket listener on `127.0.0.1` at the selected port (default `7777`), with WebSocket endpoint **`ws://localhost:7777/ws`** and health endpoint `http://localhost:7777/`. No LAN or WAN interface listens by default, and browser WebSocket connections are accepted only from the Ahlyx Labs dashboard or an explicit loopback development origin.
 
 ```powershell
 # Windows (run from an elevated PowerShell/Terminal)
@@ -169,6 +169,8 @@ Local mode is the default. It starts an HTTP/WebSocket listener on the selected 
 ```
 
 Keep the default port when using the hosted Ahlyx Labs PCAP page. For a custom port, use a WebSocket client or dashboard configured for the matching `ws://localhost:<port>/ws` endpoint.
+
+`--listen` is an advanced option for a deliberate alternate bind address. A non-loopback value prints a warning because it makes captured metadata reachable to other hosts; use it only with an appropriate access-control layer on a trusted network.
 
 ### Dashboard
 

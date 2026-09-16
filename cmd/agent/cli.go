@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"time"
 
@@ -17,6 +18,7 @@ import (
 
 var (
 	flagInterface string
+	flagListen    string
 	flagPort      int
 	flagRelay     bool
 )
@@ -28,6 +30,7 @@ func buildRootCmd() *cobra.Command {
 	}
 
 	root.PersistentFlags().StringVarP(&flagInterface, "interface", "i", "", "Network interface to capture on (default: auto-detect)")
+	root.PersistentFlags().StringVar(&flagListen, "listen", "127.0.0.1", "Local WebSocket bind address (advanced; default is loopback only)")
 	root.PersistentFlags().IntVarP(&flagPort, "port", "p", 7777, "WebSocket server port")
 	root.PersistentFlags().BoolVar(&flagRelay, "relay", false, "Stream via api.ahlyxlabs.com relay instead of local WebSocket")
 
@@ -60,6 +63,12 @@ func buildListCmd() *cobra.Command {
 }
 
 func runStart(cmd *cobra.Command, args []string) error {
+	if ip := net.ParseIP(flagListen); ip == nil {
+		return fmt.Errorf("listen address must be an IP address, got %q", flagListen)
+	} else if !ip.IsLoopback() {
+		log.Printf("WARNING: --listen %s exposes packet metadata to other hosts. Use only on a trusted network with an appropriate access-control layer.", flagListen)
+	}
+
 	iface := flagInterface
 	if iface == "" {
 		auto, err := capture.SelectDefault()
@@ -127,7 +136,7 @@ func runStart(cmd *cobra.Command, args []string) error {
 	hub := ws.NewHub()
 	go hub.Run()
 
-	srv := ws.NewServer(flagPort, hub)
+	srv := ws.NewServerAt(flagListen, flagPort, hub)
 
 	hub.Broadcast(ws.NewStatusMessage("local", iface, sess.ID, false))
 
@@ -140,7 +149,7 @@ func runStart(cmd *cobra.Command, args []string) error {
 	time.Sleep(100 * time.Millisecond)
 
 	hub.Broadcast(ws.NewStatusMessage("local", iface, sess.ID, true))
-	log.Printf("capturing on %s  (ws://localhost:%d)", iface, flagPort)
+	log.Printf("capturing on %s  (ws://%s:%d)", iface, flagListen, flagPort)
 
 	cap.Start(pktCh)
 	return runAnalysisPipeline(hub.Broadcast, pktCh, localIPs)

@@ -5,7 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
+	"net/url"
+	"strings"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -18,19 +21,22 @@ const (
 	maxMessageSize = 64 << 10
 )
 
-var upgrader = websocket.Upgrader{
-	CheckOrigin: func(r *http.Request) bool { return true },
-}
-
 // Server wraps the HTTP server and WebSocket hub.
 type Server struct {
-	port int
-	hub  *Hub
+	listenAddr string
+	port       int
+	hub        *Hub
 }
 
-// NewServer creates a Server bound to the given port.
+// NewServer creates a loopback-only Server bound to the given port.
 func NewServer(port int, hub *Hub) *Server {
-	return &Server{port: port, hub: hub}
+	return NewServerAt("127.0.0.1", port, hub)
+}
+
+// NewServerAt creates a Server bound to listenAddr and port. Callers should
+// use NewServer unless they have deliberately chosen a different bind address.
+func NewServerAt(listenAddr string, port int, hub *Hub) *Server {
+	return &Server{listenAddr: listenAddr, port: port, hub: hub}
 }
 
 // Start launches the HTTP server. Blocks until the server exits.
@@ -39,7 +45,7 @@ func (s *Server) Start() error {
 	mux.HandleFunc("/ws", s.handleWS)
 	mux.HandleFunc("/", s.handleHealth)
 
-	addr := fmt.Sprintf(":%d", s.port)
+	addr := net.JoinHostPort(s.listenAddr, fmt.Sprintf("%d", s.port))
 	log.Printf("ws/server: listening on %s", addr)
 	return http.ListenAndServe(addr, mux)
 }
@@ -54,6 +60,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
+	upgrader := websocket.Upgrader{CheckOrigin: isAllowedOrigin}
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.Printf("ws/server: upgrade error: %v", err)
@@ -65,6 +72,27 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 
 	go s.writePump(client)
 	go s.readPump(client)
+}
+
+// isAllowedOrigin limits browser connections to the hosted dashboard and to
+// explicit loopback development pages. Local mode is a privacy boundary, not
+// a LAN service, so arbitrary websites must not attach to it.
+func isAllowedOrigin(r *http.Request) bool {
+	origin := r.Header.Get("Origin")
+	u, err := url.Parse(origin)
+	if err != nil || u.Host == "" || u.User != nil || u.Path != "" || u.RawQuery != "" || u.Fragment != "" {
+		return false
+	}
+
+	if u.Scheme == "https" && (u.Host == "ahlyxlabs.com" || u.Host == "www.ahlyxlabs.com") {
+		return true
+	}
+	if u.Scheme != "http" {
+		return false
+	}
+
+	host := strings.Trim(u.Hostname(), "[]")
+	return host == "localhost" || host == "127.0.0.1" || host == "::1"
 }
 
 // writePump is the sole writer for a client connection. It gives control
