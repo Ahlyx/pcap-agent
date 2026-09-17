@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"time"
 
@@ -17,6 +18,7 @@ import (
 
 var (
 	flagInterface string
+	flagListen    string
 	flagPort      int
 	flagRelay     bool
 )
@@ -28,6 +30,7 @@ func buildRootCmd() *cobra.Command {
 	}
 
 	root.PersistentFlags().StringVarP(&flagInterface, "interface", "i", "", "Network interface to capture on (default: auto-detect)")
+	root.PersistentFlags().StringVar(&flagListen, "listen", "127.0.0.1", "Local WebSocket bind address (advanced; default is loopback only)")
 	root.PersistentFlags().IntVarP(&flagPort, "port", "p", 7777, "WebSocket server port")
 	root.PersistentFlags().BoolVar(&flagRelay, "relay", false, "Stream via api.ahlyxlabs.com relay instead of local WebSocket")
 
@@ -60,6 +63,12 @@ func buildListCmd() *cobra.Command {
 }
 
 func runStart(cmd *cobra.Command, args []string) error {
+	if ip := net.ParseIP(flagListen); ip == nil {
+		return fmt.Errorf("listen address must be an IP address, got %q", flagListen)
+	} else if !ip.IsLoopback() {
+		log.Printf("WARNING: --listen %s exposes packet metadata to other hosts. Use only on a trusted network with an appropriate access-control layer.", flagListen)
+	}
+
 	iface := flagInterface
 	if iface == "" {
 		auto, err := capture.SelectDefault()
@@ -98,9 +107,9 @@ func runStart(cmd *cobra.Command, args []string) error {
 	pktCh := make(chan gopacket.Packet, 1024)
 
 	if flagRelay {
-		fmt.Println("WARNING: relay mode enabled — connection metadata will be transmitted")
-		fmt.Println("to api.ahlyxlabs.com. No packet payloads are ever transmitted,")
-		fmt.Println("only flow summaries (src IP, dst IP, port, protocol, byte count).")
+		fmt.Println("WARNING: relay mode enabled — capture metadata will be transmitted")
+		fmt.Println("to api.ahlyxlabs.com. No raw packet payloads are ever transmitted,")
+		fmt.Println("but flow addresses/ports, DNS metadata, MAC observations, alerts, and aggregate statistics may be included.")
 		fmt.Println("Press ENTER to continue or Ctrl+C to cancel.")
 		fmt.Scanln()
 
@@ -113,8 +122,8 @@ func runStart(cmd *cobra.Command, args []string) error {
 		fmt.Printf("pcap-agent v0.2.0\n")
 		fmt.Printf("interface:  %s\n", iface)
 		fmt.Printf("mode:       relay\n")
-		fmt.Printf("session:    %s\n", relayClient.SessionID())
-		fmt.Printf("dashboard:  ahlyxlabs.com/pcap?session=%s\n", relayClient.SessionID())
+		fmt.Printf("dashboard:  %s\n", relayClient.DashboardURL())
+		fmt.Printf("// This one-time viewer link grants access to relay metadata; keep it private.\n")
 		fmt.Printf("press Ctrl+C to stop\n")
 
 		cap.Start(pktCh)
@@ -127,7 +136,7 @@ func runStart(cmd *cobra.Command, args []string) error {
 	hub := ws.NewHub()
 	go hub.Run()
 
-	srv := ws.NewServer(flagPort, hub)
+	srv := ws.NewServerAt(flagListen, flagPort, hub)
 
 	hub.Broadcast(ws.NewStatusMessage("local", iface, sess.ID, false))
 
@@ -140,7 +149,7 @@ func runStart(cmd *cobra.Command, args []string) error {
 	time.Sleep(100 * time.Millisecond)
 
 	hub.Broadcast(ws.NewStatusMessage("local", iface, sess.ID, true))
-	log.Printf("capturing on %s  (ws://localhost:%d)", iface, flagPort)
+	log.Printf("capturing on %s  (ws://%s:%d)", iface, flagListen, flagPort)
 
 	cap.Start(pktCh)
 	return runAnalysisPipeline(hub.Broadcast, pktCh, localIPs)
