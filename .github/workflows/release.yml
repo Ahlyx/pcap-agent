@@ -9,6 +9,10 @@ jobs:
   build:
     name: Build ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+      attestations: write
+      id-token: write
     strategy:
       matrix:
         include:
@@ -35,10 +39,10 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
         with:
           go-version: '1.22'
 
@@ -67,10 +71,15 @@ jobs:
         run: tar -czf '${{ matrix.asset }}' '${{ matrix.binary }}'
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: ${{ matrix.asset }}
           path: ${{ matrix.asset }}
+
+      - name: Attest archive provenance
+        uses: actions/attest-build-provenance@db473fddc028af60658334401dc6fa3ffd8669fd # v2.3.0
+        with:
+          subject-path: ${{ matrix.asset }}
 
   release:
     name: Create Release
@@ -81,16 +90,20 @@ jobs:
 
     steps:
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           merge-multiple: true
 
+      - name: Create checksum manifest
+        run: sha256sum pcap-agent-windows.zip pcap-agent-linux.tar.gz pcap-agent-macos-intel.tar.gz pcap-agent-macos-apple-silicon.tar.gz > SHA256SUMS
+
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           files: |
             pcap-agent-windows.zip
             pcap-agent-linux.tar.gz
             pcap-agent-macos-intel.tar.gz
             pcap-agent-macos-apple-silicon.tar.gz
+            SHA256SUMS
           generate_release_notes: true

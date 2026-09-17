@@ -1,4 +1,5 @@
 # Binaries
+agent
 pcap-agent
 pcap-agent-*
 *.exe
@@ -6,6 +7,7 @@ pcap-agent-*
 # Go
 *.test
 *.out
+target/
 
 # Environment
 .env

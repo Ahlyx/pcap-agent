@@ -120,6 +120,32 @@ After extraction, open a terminal in the extracted folder. Automatic interface s
 
 The Linux and macOS archives preserve the executable bit. If you extracted them with a tool that removed it, restore it once with `chmod +x pcap-agent`.
 
+### Verify a downloaded release
+
+Every release includes a `SHA256SUMS` asset covering every downloadable
+archive. Download it from the same official GitHub release as the archive.
+
+```bash
+# Linux/macOS: run in the folder containing SHA256SUMS and the archive.
+sha256sum -c SHA256SUMS
+```
+
+```powershell
+# Windows: compare the archive hash with its matching SHA256SUMS entry.
+(Get-FileHash .\pcap-agent-windows.zip -Algorithm SHA256).Hash
+```
+
+GitHub Actions also publishes build provenance attestations for release
+archives. With GitHub CLI installed, an optional provenance check is:
+
+```bash
+gh attestation verify pcap-agent-linux.tar.gz --repo Ahlyx/pcap-agent
+```
+
+Checksums confirm the downloaded archive matches the release manifest;
+provenance verification checks the recorded GitHub Actions build origin. These
+artifacts are not represented as a separate code-signing certificate.
+
 ## Using the agent
 
 ### Automatic interface selection
