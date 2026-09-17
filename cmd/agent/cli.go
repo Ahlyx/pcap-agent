@@ -17,16 +17,22 @@ import (
 )
 
 var (
+	// Version is replaced by the release workflow with the immutable Git tag.
+	// Local builds retain the useful development fallback.
+	Version       = "dev"
 	flagInterface string
 	flagListen    string
 	flagPort      int
 	flagRelay     bool
 )
 
+func agentVersionLine() string { return "pcap-agent " + Version }
+
 func buildRootCmd() *cobra.Command {
 	root := &cobra.Command{
-		Use:   "pcap-agent",
-		Short: "Network traffic capture agent with browser streaming",
+		Use:     "pcap-agent",
+		Short:   "Network traffic capture agent with browser streaming",
+		Version: Version,
 	}
 
 	root.PersistentFlags().StringVarP(&flagInterface, "interface", "i", "", "Network interface to capture on (default: auto-detect)")
@@ -119,7 +125,7 @@ func runStart(cmd *cobra.Command, args []string) error {
 		}
 		defer relayClient.Close()
 
-		fmt.Printf("pcap-agent v0.2.0\n")
+		fmt.Println(agentVersionLine())
 		fmt.Printf("interface:  %s\n", iface)
 		fmt.Printf("mode:       relay\n")
 		fmt.Printf("dashboard:  %s\n", relayClient.DashboardURL())
