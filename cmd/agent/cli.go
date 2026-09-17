@@ -107,9 +107,9 @@ func runStart(cmd *cobra.Command, args []string) error {
 	pktCh := make(chan gopacket.Packet, 1024)
 
 	if flagRelay {
-		fmt.Println("WARNING: relay mode enabled — connection metadata will be transmitted")
-		fmt.Println("to api.ahlyxlabs.com. No packet payloads are ever transmitted,")
-		fmt.Println("only flow summaries (src IP, dst IP, port, protocol, byte count).")
+		fmt.Println("WARNING: relay mode enabled — capture metadata will be transmitted")
+		fmt.Println("to api.ahlyxlabs.com. No raw packet payloads are ever transmitted,")
+		fmt.Println("but flow addresses/ports, DNS metadata, MAC observations, alerts, and aggregate statistics may be included.")
 		fmt.Println("Press ENTER to continue or Ctrl+C to cancel.")
 		fmt.Scanln()
 
@@ -122,8 +122,8 @@ func runStart(cmd *cobra.Command, args []string) error {
 		fmt.Printf("pcap-agent v0.2.0\n")
 		fmt.Printf("interface:  %s\n", iface)
 		fmt.Printf("mode:       relay\n")
-		fmt.Printf("session:    %s\n", relayClient.SessionID())
-		fmt.Printf("dashboard:  ahlyxlabs.com/pcap?session=%s\n", relayClient.SessionID())
+		fmt.Printf("dashboard:  %s\n", relayClient.DashboardURL())
+		fmt.Printf("// This one-time viewer link grants access to relay metadata; keep it private.\n")
 		fmt.Printf("press Ctrl+C to stop\n")
 
 		cap.Start(pktCh)

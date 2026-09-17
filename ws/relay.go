@@ -6,6 +6,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"time"
 
@@ -14,13 +15,16 @@ import (
 
 // RelayClient connects to the Ahlyx Labs relay server and forwards broadcast messages.
 type RelayClient struct {
-	sessionID string
-	conn      *websocket.Conn
+	sessionID    string
+	dashboardURL string
+	conn         *websocket.Conn
 }
 
 type sessionResponse struct {
-	SessionID string `json:"session_id"`
-	RelayURL  string `json:"relay_url"`
+	SessionID   string `json:"session_id"`
+	RelayURL    string `json:"relay_url"`
+	AgentToken  string `json:"agent_token"`
+	ViewerToken string `json:"viewer_token"`
 }
 
 // NewRelayClient fetches a session from apiBase and dials the relay WebSocket.
@@ -43,12 +47,18 @@ func NewRelayClient(apiBase string) (*RelayClient, error) {
 		return nil, fmt.Errorf("parse session response: %w", err)
 	}
 
-	dialer := websocket.Dialer{HandshakeTimeout: 10 * time.Second}
-	conn, _, err := dialer.Dial(sr.RelayURL+"?role=agent", nil)
-	if err != nil {
-		return nil, fmt.Errorf("dial relay %s: %w", sr.RelayURL, err)
+	if sr.SessionID == "" || sr.RelayURL == "" || sr.AgentToken == "" || sr.ViewerToken == "" {
+		return nil, fmt.Errorf("fetch session: server returned incomplete credentials")
 	}
-	rc := &RelayClient{sessionID: sr.SessionID, conn: conn}
+
+	dialer := websocket.Dialer{HandshakeTimeout: 10 * time.Second}
+	header := http.Header{}
+	header.Set("Authorization", "Bearer "+sr.AgentToken)
+	conn, _, err := dialer.Dial(sr.RelayURL, header)
+	if err != nil {
+		return nil, fmt.Errorf("dial relay: %w", err)
+	}
+	rc := &RelayClient{sessionID: sr.SessionID, dashboardURL: relayDashboardURL(sr.SessionID, sr.ViewerToken), conn: conn}
 	go rc.readPump()
 	return rc, nil
 }
@@ -66,6 +76,16 @@ func (rc *RelayClient) readPump() {
 // SessionID returns the relay session ID assigned by the server.
 func (rc *RelayClient) SessionID() string {
 	return rc.sessionID
+}
+
+// DashboardURL is a one-time viewer launch link. Its credential is in the
+// fragment, which never reaches HTTP request logs or referrers.
+func (rc *RelayClient) DashboardURL() string {
+	return rc.dashboardURL
+}
+
+func relayDashboardURL(sessionID, viewerToken string) string {
+	return "https://ahlyxlabs.com/pcap#relay_session=" + url.QueryEscape(sessionID) + "&viewer_token=" + url.QueryEscape(viewerToken)
 }
 
 // Broadcast marshals msg to JSON and writes it to the relay connection.
