@@ -61,3 +61,15 @@ func TestPipelineOnlyFeedsInitialSynAttemptsAndKnownLocalCadence(t *testing.T) {
 		t.Fatalf("two unique SYN attempts did not produce scan evidence: %#v", got)
 	}
 }
+
+func TestAgentVersionLineUsesBuildMetadata(t *testing.T) {
+	original := Version
+	t.Cleanup(func() { Version = original })
+	Version = "v0.4.4"
+	if got, want := agentVersionLine(), "pcap-agent v0.4.4"; got != want {
+		t.Fatalf("agentVersionLine() = %q, want %q", got, want)
+	}
+	if got, want := buildRootCmd().Version, "v0.4.4"; got != want {
+		t.Fatalf("root command Version = %q, want %q", got, want)
+	}
+}
